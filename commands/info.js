@@ -29,9 +29,9 @@ export default {
         if (err2) return interactionOrMessage.reply(`❌ Error fetching PlayerData: ${err2.errorMessage}`);
 
         const data = dataResult.data || {};
-        const money = data.Money?.Value || "0";
-        const ads = data.Ads?.Value || "0";
-        const lastReset = data.LastResetTime?.Value || "N/A";
+        const money = data.Money?.Value ?? "0";
+        const ads = data.Ads?.Value ?? "0";
+        const lastReset = data.LastResetTime?.Value ?? "N/A";
 
         const embed = new EmbedBuilder()
           .setTitle(`Player Info: ${info.TitleInfo.DisplayName}`)
@@ -39,15 +39,15 @@ export default {
             { name: "PlayFabId", value: info.PlayFabId, inline: true },
             { name: "Created", value: info.Created, inline: true },
             { name: "Last Login", value: info.TitleInfo.LastLogin, inline: true },
-            { name: "Coins", value: money, inline: true },
-            { name: "Ads", value: ads, inline: true },
-            { name: "LastResetTime", value: lastReset, inline: true }
+            { name: "Money", value: money.toString(), inline: true },
+            { name: "Ads", value: ads.toString(), inline: true },
+            { name: "LastResetTime", value: lastReset.toString(), inline: true }
           );
 
-        if (interactionOrMessage.reply && !interactionOrMessage.options) {
+        if (!interactionOrMessage.options?.getString) {
           interactionOrMessage.reply({ embeds: [embed] });
         } else {
-          interactionOrMessage.reply({ embeds: [embed], flags: 64 });
+          interactionOrMessage.reply({ embeds: [embed], ephemeral: true });
         }
       });
     });
