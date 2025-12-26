@@ -1,4 +1,6 @@
+// commands/unban.js
 import PlayFab from 'playfab-sdk';
+import { replySafe, getStringOption, isInteraction } from '../utils/commandHelpers.js';
 
 export default {
   name: "unban",
@@ -11,14 +13,13 @@ export default {
       required: true
     }
   ],
-  async execute(interaction) {
-    const playerId = interaction.options.getString("id");
-    if (!playerId) return interaction.reply({ content: "❌ Provide a PlayFab ID", ephemeral: true });
+  async execute(interactionOrMessage, args = []) {
+    const playerId = getStringOption(interactionOrMessage, "id", args, 0);
+    if (!playerId) return replySafe(interactionOrMessage, "❌ Provide a PlayFab ID", { ephemeral: true });
 
     PlayFab.PlayFabServer.RevokeBans({ PlayFabId: playerId }, (err, result) => {
-      if (err) return interaction.reply({ content: `❌ Error: ${err.errorMessage}`, ephemeral: true });
-
-      interaction.reply({ content: `✅ Player ${playerId} has been unbanned.`, ephemeral: true });
+      if (err) return replySafe(interactionOrMessage, `❌ Error: ${err.errorMessage || err}`, { ephemeral: true });
+      return replySafe(interactionOrMessage, `✅ Player ${playerId} has been unbanned.`, { ephemeral: isInteraction(interactionOrMessage) });
     });
   }
 };
