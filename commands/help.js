@@ -10,8 +10,7 @@ export default {
 \`info <playfab_id>\` - Show player stats from PlayFab
 \`setpoints <playfab_id> <number>\` - Set Money value
 \`unban <playfab_id>\` - Unban a player
-\`modlist` - Show app moderators list
-\`help\` - Show this help
+\`modlist\` - Show app moderators list
     `;
     return replySafe(interactionOrMessage, helpText, { ephemeral: isInteraction(interactionOrMessage) });
   }
