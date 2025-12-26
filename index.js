@@ -4,7 +4,6 @@ import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
-import fs from 'fs';
 const config = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url), 'utf-8'));
 
 // --- PLAYFAB ---
