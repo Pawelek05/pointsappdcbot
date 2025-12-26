@@ -13,14 +13,12 @@ export default {
   ],
   async execute(interactionOrMessage, args) {
     let user;
-    let guild;
+    let guild = interactionOrMessage.guild;
 
     if (interactionOrMessage.options?.getUser) {
       user = interactionOrMessage.options.getUser("user");
-      guild = interactionOrMessage.guild;
     } else {
       user = interactionOrMessage.mentions?.users?.first();
-      guild = interactionOrMessage.guild;
       if (!user) return interactionOrMessage.reply("❌ Mention a user");
     }
 

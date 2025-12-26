@@ -13,16 +13,14 @@ export default {
   ],
   async execute(interactionOrMessage, args) {
     let user;
-    let guild;
+    let guild = interactionOrMessage.guild;
 
     if (interactionOrMessage.options?.getUser) {
-      // Slash command
+      // Slash
       user = interactionOrMessage.options.getUser("user");
-      guild = interactionOrMessage.guild;
     } else {
       // Message command
       user = interactionOrMessage.mentions?.users?.first();
-      guild = interactionOrMessage.guild;
       if (!user) return interactionOrMessage.reply("❌ Mention a user");
     }
 
@@ -37,6 +35,7 @@ export default {
     }
 
     const replyText = `${user.tag} is now a bot moderator.`;
+
     if (interactionOrMessage.options?.getUser) {
       interactionOrMessage.reply({ content: replyText, ephemeral: true });
     } else {

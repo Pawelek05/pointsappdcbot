@@ -19,21 +19,19 @@ export default {
 
     if (!playerId) return interactionOrMessage.reply("❌ Provide a PlayFab ID");
 
-    // Pobieramy dane użytkownika z PlayFab Server API
     PlayFab.PlayFabServer.GetUserAccountInfo({ PlayFabId: playerId }, (err, result) => {
       if (err) return interactionOrMessage.reply(`❌ Error: ${err.errorMessage}`);
 
       const info = result.data.UserInfo;
 
-      // Pobranie PlayerData z Server API
       PlayFab.PlayFabServer.GetUserData({ PlayFabId: playerId }, (err2, dataResult) => {
         if (err2) return interactionOrMessage.reply(`❌ Error fetching PlayerData: ${err2.errorMessage}`);
 
-        const data = dataResult.data || {};
+        const pdata = dataResult.data?.Data || {};
 
-        const money = data.Money?.Value ?? "0";
-        const ads = data.Ads?.Value ?? "0";
-        const lastReset = data.LastResetTime?.Value ?? "N/A";
+        const money = pdata.Money?.Value ?? "0";
+        const ads = pdata.Ads?.Value ?? "0";
+        const lastReset = pdata.LastResetTime?.Value ?? "N/A";
 
         const embed = new EmbedBuilder()
           .setTitle(`Player Info: ${info.TitleInfo.DisplayName}`)
@@ -41,7 +39,7 @@ export default {
             { name: "PlayFabId", value: info.PlayFabId, inline: true },
             { name: "Created", value: info.Created, inline: true },
             { name: "Last Login", value: info.TitleInfo.LastLogin, inline: true },
-            { name: "Coins", value: money.toString(), inline: true },
+            { name: "Money", value: money.toString(), inline: true },
             { name: "Ads", value: ads.toString(), inline: true },
             { name: "LastResetTime", value: lastReset.toString(), inline: true }
           );
