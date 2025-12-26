@@ -19,16 +19,18 @@ export default {
 
     if (!playerId) return interactionOrMessage.reply("❌ Provide a PlayFab ID");
 
+    // Pobieramy dane użytkownika z PlayFab Server API
     PlayFab.PlayFabServer.GetUserAccountInfo({ PlayFabId: playerId }, (err, result) => {
       if (err) return interactionOrMessage.reply(`❌ Error: ${err.errorMessage}`);
 
       const info = result.data.UserInfo;
 
-      // Pobranie PlayerData
+      // Pobranie PlayerData z Server API
       PlayFab.PlayFabServer.GetUserData({ PlayFabId: playerId }, (err2, dataResult) => {
         if (err2) return interactionOrMessage.reply(`❌ Error fetching PlayerData: ${err2.errorMessage}`);
 
         const data = dataResult.data || {};
+
         const money = data.Money?.Value ?? "0";
         const ads = data.Ads?.Value ?? "0";
         const lastReset = data.LastResetTime?.Value ?? "N/A";
@@ -39,15 +41,15 @@ export default {
             { name: "PlayFabId", value: info.PlayFabId, inline: true },
             { name: "Created", value: info.Created, inline: true },
             { name: "Last Login", value: info.TitleInfo.LastLogin, inline: true },
-            { name: "Money", value: money.toString(), inline: true },
+            { name: "Coins", value: money.toString(), inline: true },
             { name: "Ads", value: ads.toString(), inline: true },
             { name: "LastResetTime", value: lastReset.toString(), inline: true }
           );
 
-        if (!interactionOrMessage.options?.getString) {
-          interactionOrMessage.reply({ embeds: [embed] });
-        } else {
+        if (interactionOrMessage.options?.getString) {
           interactionOrMessage.reply({ embeds: [embed], ephemeral: true });
+        } else {
+          interactionOrMessage.reply({ embeds: [embed] });
         }
       });
     });

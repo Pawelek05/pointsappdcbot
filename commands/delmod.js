@@ -6,34 +6,41 @@ export default {
   options: [
     {
       name: "user",
-      description: "User to remove",
+      description: "User to remove as mod",
       type: 6, // USER
       required: true
     }
   ],
   async execute(interactionOrMessage, args) {
     let user;
-    if (interactionOrMessage.options) {
+    let guild;
+
+    if (interactionOrMessage.options?.getUser) {
       user = interactionOrMessage.options.getUser("user");
+      guild = interactionOrMessage.guild;
     } else {
-      user = interactionOrMessage.mentions.users.first();
+      user = interactionOrMessage.mentions?.users?.first();
+      guild = interactionOrMessage.guild;
       if (!user) return interactionOrMessage.reply("❌ Mention a user");
     }
 
-    const guildId = interactionOrMessage.guild.id;
-    let cfg = await GuildConfig.findOne({ guildId });
-    if (!cfg || !cfg.mods.includes(user.id)) {
-      return interactionOrMessage.reply("❌ This user is not a bot moderator.");
-    }
+    if (!guild) return interactionOrMessage.reply("❌ This command can only be used in a server");
 
-    cfg.mods = cfg.mods.filter(id => id !== user.id);
-    await cfg.save();
+    let cfg = await GuildConfig.findOne({ guildId: guild.id });
+    if (!cfg) return interactionOrMessage.reply("❌ No configuration found for this server");
 
-    const replyText = `${user.tag} is no longer a bot moderator.`;
-    if (interactionOrMessage.reply && !interactionOrMessage.options) {
-      interactionOrMessage.reply(replyText);
+    const index = cfg.mods.indexOf(user.id);
+    if (index !== -1) {
+      cfg.mods.splice(index, 1);
+      await cfg.save();
+      const replyText = `${user.tag} is no longer a bot moderator.`;
+      if (interactionOrMessage.options?.getUser) {
+        interactionOrMessage.reply({ content: replyText, ephemeral: true });
+      } else {
+        interactionOrMessage.reply(replyText);
+      }
     } else {
-      interactionOrMessage.reply({ content: replyText, flags: 64 });
+      interactionOrMessage.reply("❌ This user is not a bot moderator.");
     }
   }
 };
