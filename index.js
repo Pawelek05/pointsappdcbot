@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
-import config from './config.json' assert { type: 'json' };
+const config = await import('./config.json').then(mod => mod.default);
 
 // --- PLAYFAB ---
 PlayFab.settings.titleId = "171DCA";
