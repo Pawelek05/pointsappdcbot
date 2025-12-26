@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import 'dotenv/config'; // nie jest potrzebne na Railway, można zostawić bezpiecznie
 import { Client, GatewayIntentBits, Collection, REST, Routes } from 'discord.js';
 import mongoose from 'mongoose';
 import fs from 'fs';
@@ -6,9 +6,20 @@ import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
 
+// --- PLAYFAB ---
 PlayFab.settings.titleId = "171DCA";
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
+// --- ENV CHECK ---
+const { TOKEN, CLIENT_ID, MONGO_URI } = process.env;
+if (!TOKEN || !CLIENT_ID || !MONGO_URI) {
+  console.error("❌ Missing environment variables! Make sure TOKEN, CLIENT_ID, and MONGO_URI are set.");
+  process.exit(1);
+}
+
+// --- DISCORD CLIENT ---
+const client = new Client({ 
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
+});
 client.commands = new Collection();
 
 // --- LOAD COMMANDS ---
@@ -18,16 +29,22 @@ for (const file of commandFiles) {
   client.commands.set(cmd.default.name, cmd.default);
 }
 
-// --- MONGODB ---
-await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-console.log("MongoDB connected");
+// --- MONGODB CONNECTION ---
+try {
+  await mongoose.connect(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
+  console.log("✅ MongoDB connected");
+} catch (err) {
+  console.error("❌ MongoDB connection failed:", err);
+  process.exit(1);
+}
 
 // --- SLASH COMMANDS REGISTRATION ---
 client.once('ready', async () => {
-  console.log(`Logged in as ${client.user.tag}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
 
-  const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
   const slashCommands = [];
+
   for (const cmd of client.commands.values()) {
     slashCommands.push({ name: cmd.name, description: cmd.description || 'No description' });
   }
@@ -35,26 +52,26 @@ client.once('ready', async () => {
   for (const guild of client.guilds.cache.values()) {
     try {
       await rest.put(
-        Routes.applicationGuildCommands(process.env.CLIENT_ID, guild.id),
+        Routes.applicationGuildCommands(CLIENT_ID, guild.id),
         { body: slashCommands }
       );
-      console.log(`Registered slash commands for guild ${guild.id}`);
-    } catch (e) { console.error(e); }
+      console.log(`✅ Registered slash commands for guild ${guild.id}`);
+    } catch (e) {
+      console.error("❌ Slash command registration error:", e);
+    }
   }
 });
 
-// --- HELPER: GET PREFIX ---
+// --- HELPERS ---
 async function getPrefix(guildId) {
   const cfg = await GuildConfig.findOne({ guildId });
   return cfg?.prefix || '!';
 }
 
-// --- HELPER: CHECK PERMISSIONS ---
 async function hasPermission(userId, guildId, ownerId) {
   if (userId === ownerId) return true;
   const cfg = await GuildConfig.findOne({ guildId });
-  if (cfg && cfg.mods.includes(userId)) return true;
-  return false;
+  return cfg?.mods.includes(userId) || false;
 }
 
 // --- MESSAGE COMMAND HANDLER ---
@@ -72,7 +89,7 @@ client.on('messageCreate', async message => {
   if (!allowed) return message.reply("❌ You don't have permission to use this command.");
 
   try { await command.execute(message, args); } 
-  catch (err) { console.error(err); message.reply("Command error"); }
+  catch (err) { console.error(err); message.reply("❌ Command error"); }
 });
 
 // --- SLASH COMMAND HANDLER ---
@@ -94,7 +111,6 @@ client.on('interactionCreate', async interaction => {
   const allowed = await hasPermission(interaction.user.id, interaction.guildId, interaction.guild.ownerId);
   if (!allowed) return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
 
-  // Fake message object
   const fakeMsg = {
     guild: interaction.guild,
     author: interaction.user,
@@ -102,13 +118,15 @@ client.on('interactionCreate', async interaction => {
     channel: interaction.channel,
     client,
     reply: (contentOrOptions) => {
-      if (typeof contentOrOptions === 'string') return interaction.reply({ content: contentOrOptions, ephemeral: false });
+      if (typeof contentOrOptions === 'string') 
+        return interaction.reply({ content: contentOrOptions, ephemeral: false });
       return interaction.reply({ ...contentOrOptions, ephemeral: false });
     }
   };
 
   try { await cmd.execute(fakeMsg, args); }
-  catch (err) { console.error(err); interaction.reply({ content: 'Slash command error', ephemeral: true }); }
+  catch (err) { console.error(err); interaction.reply({ content: '❌ Slash command error', ephemeral: true }); }
 });
 
-client.login(process.env.TOKEN);
+// --- LOGIN ---
+client.login(TOKEN);
