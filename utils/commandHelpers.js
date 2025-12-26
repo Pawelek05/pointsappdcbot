@@ -1,6 +1,4 @@
 // utils/commandHelpers.js
-// Named exports: isInteraction, replySafe, getUserFromInvocation, getStringOption, getIntegerOption
-
 export function isInteraction(obj) {
   return !!(
     obj &&
@@ -21,12 +19,9 @@ export async function replySafe(interactionOrMessage, content, opts = {}) {
     if (opts.embeds) payload.embeds = opts.embeds;
     if (opts.ephemeral) payload.ephemeral = true;
     if (Object.keys(payload).length === 0) payload.content = '\u200B';
-    // note: if reply was already used, you may need followUp/editReply in your codepath
     return interactionOrMessage.reply(payload);
   } else {
-    if (opts.embeds) {
-      return interactionOrMessage.reply({ embeds: opts.embeds });
-    }
+    if (opts.embeds) return interactionOrMessage.reply({ embeds: opts.embeds });
     return interactionOrMessage.reply(content);
   }
 }
@@ -37,7 +32,7 @@ export function getUserFromInvocation(interactionOrMessage, args = [], argIndex 
     try {
       const u = interactionOrMessage.options.getUser("user");
       if (u) return u;
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
 
   // 2) Message mentions
@@ -58,7 +53,7 @@ export function getStringOption(interactionOrMessage, name, args = [], argIndex 
   if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getString === 'function') {
     try {
       return interactionOrMessage.options.getString(name);
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
   return args && args[argIndex] !== undefined ? String(args[argIndex]) : null;
 }
@@ -67,7 +62,7 @@ export function getIntegerOption(interactionOrMessage, name, args = [], argIndex
   if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getInteger === 'function') {
     try {
       return interactionOrMessage.options.getInteger(name);
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
   if (args && args[argIndex] !== undefined) {
     const v = parseInt(args[argIndex], 10);

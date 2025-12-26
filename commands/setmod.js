@@ -1,27 +1,20 @@
+// commands/setmod.js
 import GuildConfig from '../models/GuildConfig.js';
 import { isInteraction, replySafe, getUserFromInvocation } from '../utils/commandHelpers.js';
 
 export default {
   name: "setmod",
   description: "Add a user to the bot moderators list",
-  options: [
-    {
-      name: "user",
-      description: "User to add as mod",
-      type: 6, // USER
-      required: true
-    }
-  ],
+  options: [{ name: "user", description: "User to add as mod", type: 6, required: true }],
   async execute(interactionOrMessage, args = []) {
     const guild = interactionOrMessage.guild;
     if (!guild) return replySafe(interactionOrMessage, "❌ This command can only be used in a server", { ephemeral: true });
 
-    // Pobierz usera bezpiecznie (slash -> options.getUser, message -> mention lub id w args)
-    let user = getUserFromInvocation(interactionOrMessage, 0, args);
-    if (!user) return replySafe(interactionOrMessage, "❌ Mention a user or provide an ID");
+    let user = getUserFromInvocation(interactionOrMessage, args, 0);
+    if (!user) return replySafe(interactionOrMessage, "❌ Mention a user or provide an ID", { ephemeral: isInteraction(interactionOrMessage) });
 
-    // Jeśli user jest 'shallow' obiektem (tylko id z args), spróbuj pobrać pełny obiekt z guild
-    if (!user.tag && guild.members) {
+    // Jeśli mamy tylko id-like object spróbuj pobrać pełny user
+    if (!user.tag && user.id && guild.members) {
       const member = await guild.members.fetch(user.id).catch(() => null);
       if (member) user = member.user;
     }
