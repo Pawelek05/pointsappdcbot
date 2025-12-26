@@ -1,10 +1,10 @@
-import 'dotenv/config'; // nie jest potrzebne na Railway, można zostawić bezpiecznie
 import { Client, GatewayIntentBits, Collection, REST, Routes } from 'discord.js';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
+import config from './config.json' assert { type: 'json' };
 
 // --- PLAYFAB ---
 PlayFab.settings.titleId = "171DCA";
@@ -65,11 +65,13 @@ client.once('ready', async () => {
 // --- HELPERS ---
 async function getPrefix(guildId) {
   const cfg = await GuildConfig.findOne({ guildId });
-  return cfg?.prefix || '!';
+  return cfg?.prefix || config.defaultPrefix || '=';
 }
 
-async function hasPermission(userId, guildId, ownerId) {
-  if (userId === ownerId) return true;
+async function hasPermission(userId, guildId, guildOwnerId) {
+  if (userId === config.ownerId) return true; // bot owner
+  if (userId === guildOwnerId) return true;   // guild owner
+
   const cfg = await GuildConfig.findOne({ guildId });
   return cfg?.mods.includes(userId) || false;
 }
