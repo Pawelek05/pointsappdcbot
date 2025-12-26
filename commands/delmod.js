@@ -1,12 +1,12 @@
 import GuildConfig from '../models/GuildConfig.js';
 
 export default {
-  name: "setmod",
-  description: "Add a user to the bot moderators list",
+  name: "delmod",
+  description: "Remove a user from bot moderators",
   options: [
     {
       name: "user",
-      description: "User to add as mod",
+      description: "User to remove",
       type: 6, // USER
       required: true
     }
@@ -14,30 +14,26 @@ export default {
   async execute(interactionOrMessage, args) {
     let user;
     if (interactionOrMessage.options) {
-      // slash
       user = interactionOrMessage.options.getUser("user");
     } else {
-      // message command
       user = interactionOrMessage.mentions.users.first();
       if (!user) return interactionOrMessage.reply("❌ Mention a user");
     }
 
     const guildId = interactionOrMessage.guild.id;
     let cfg = await GuildConfig.findOne({ guildId });
-    if (!cfg) cfg = await GuildConfig.create({ guildId });
-
-    if (!cfg.mods.includes(user.id)) {
-      cfg.mods.push(user.id);
-      await cfg.save();
+    if (!cfg || !cfg.mods.includes(user.id)) {
+      return interactionOrMessage.reply("❌ This user is not a bot moderator.");
     }
 
-    const replyText = `${user.tag} is now a bot moderator.`;
+    cfg.mods = cfg.mods.filter(id => id !== user.id);
+    await cfg.save();
+
+    const replyText = `${user.tag} is no longer a bot moderator.`;
     if (interactionOrMessage.reply && !interactionOrMessage.options) {
-      // message command
       interactionOrMessage.reply(replyText);
     } else {
-      // slash
-      interactionOrMessage.reply({ content: replyText, flags: 64 }); // ephemeral
+      interactionOrMessage.reply({ content: replyText, flags: 64 });
     }
   }
 };
