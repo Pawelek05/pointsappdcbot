@@ -4,15 +4,17 @@ import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
+
 const config = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url), 'utf-8'));
 
-// --- PLAYFAB ---
+// --- PLAYFAB SERVER CONFIG ---
 PlayFab.settings.titleId = "171DCA";
+PlayFab.settings.developerSecretKey = process.env.PLAYFAB_SECRET;
 
 // --- ENV CHECK ---
 const { TOKEN, CLIENT_ID, MONGO_URI } = process.env;
-if (!TOKEN || !CLIENT_ID || !MONGO_URI) {
-  console.error("❌ Missing environment variables! Make sure TOKEN, CLIENT_ID, and MONGO_URI are set.");
+if (!TOKEN || !CLIENT_ID || !MONGO_URI || !process.env.PLAYFAB_SECRET) {
+  console.error("❌ Missing environment variables! Set TOKEN, CLIENT_ID, MONGO_URI, PLAYFAB_SECRET");
   process.exit(1);
 }
 
@@ -46,7 +48,11 @@ client.once('ready', async () => {
   const slashCommands = [];
 
   for (const cmd of client.commands.values()) {
-    slashCommands.push({ name: cmd.name, description: cmd.description || 'No description' });
+    slashCommands.push({ 
+      name: cmd.name, 
+      description: cmd.description || 'No description', 
+      options: cmd.options || []
+    });
   }
 
   for (const guild of client.guilds.cache.values()) {
@@ -100,15 +106,7 @@ client.on('interactionCreate', async interaction => {
   const cmd = client.commands.get(interaction.commandName);
   if (!cmd) return;
 
-  const args = [];
-  try {
-    for (const opt of interaction.options.data) {
-      if (opt.type === 1 && opt.options) {
-        args.push(opt.name);
-        for (const sub of opt.options) args.push(sub.value ?? sub.name);
-      } else args.push(opt.value ?? opt.name);
-    }
-  } catch {}
+  const args = cmd.options?.map(opt => interaction.options.get(opt.name)?.value) || [];
 
   const allowed = await hasPermission(interaction.user.id, interaction.guildId, interaction.guild.ownerId);
   if (!allowed) return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
