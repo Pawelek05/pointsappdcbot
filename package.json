@@ -5,7 +5,7 @@
   "type": "module",
   "dependencies": {
     "discord.js": "^14.14.0",
-    "playfab-sdk": "^1.109.200",
+	"playfab-sdk": "^2.180.250815",
     "mongoose": "^7.3.0",
     "dotenv": "^16.3.0"
   }
