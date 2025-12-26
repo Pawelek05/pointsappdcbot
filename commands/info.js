@@ -3,7 +3,7 @@ import { EmbedBuilder } from 'discord.js';
 
 export default {
   name: "info",
-  description: "Show PlayFab player data in an embed",
+  description: "Show PlayFab player info and selected PlayerData",
   options: [
     {
       name: "id",
@@ -26,18 +26,22 @@ export default {
       PlayFab.PlayFabServer.GetUserData({ PlayFabId: playerId }, (err2, dataResult) => {
         if (err2) return message.reply(`❌ Error fetching PlayerData: ${err2.errorMessage}`);
 
-        const pdata = dataResult.data
-          ? Object.entries(dataResult.data).map(([k, v]) => `**${k}:** ${v.Value}`).join("\n")
-          : "No PlayerData found.";
+        // Wybór tylko potrzebnych zmiennych
+        const data = dataResult.data || {};
+        const money = data.Money?.Value ?? "0";
+        const ads = data.Ads?.Value ?? "0";
+        const lastReset = data.LastResetTime?.Value ?? "Never";
 
         const embed = new EmbedBuilder()
           .setTitle(`Player Info: ${info.TitleInfo.DisplayName || playerId}`)
           .setColor(0x00AE86)
           .addFields(
-            { name: "PlayFabId", value: info.PlayFabId, inline: true },
+            { name: "DisplayName", value: info.TitleInfo.DisplayName || "N/A", inline: true },
             { name: "Created", value: new Date(info.Created).toLocaleString(), inline: true },
             { name: "Last Login", value: info.TitleInfo.LastLogin ? new Date(info.TitleInfo.LastLogin).toLocaleString() : "Never", inline: true },
-            { name: "Player Data", value: pdata.length > 1024 ? pdata.slice(0, 1020) + "..." : pdata }
+            { name: "Money", value: money, inline: true },
+            { name: "Ads", value: ads, inline: true },
+            { name: "LastResetTime", value: lastReset, inline: true }
           )
           .setFooter({ text: "PlayFab Info", iconURL: message.client.user.displayAvatarURL() })
           .setTimestamp();
