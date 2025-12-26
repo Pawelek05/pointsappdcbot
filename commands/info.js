@@ -39,7 +39,7 @@ export default {
             { name: "DisplayName", value: info.TitleInfo.DisplayName || "N/A", inline: true },
             { name: "Created", value: new Date(info.Created).toLocaleString(), inline: true },
             { name: "Last Login", value: info.TitleInfo.LastLogin ? new Date(info.TitleInfo.LastLogin).toLocaleString() : "Never", inline: true },
-            { name: "Money", value: money, inline: true },
+            { name: "Coins", value: money, inline: true },
             { name: "Ads", value: ads, inline: true },
             { name: "LastResetTime", value: lastReset, inline: true }
           )

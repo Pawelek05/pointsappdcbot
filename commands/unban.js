@@ -11,16 +11,14 @@ export default {
       required: true
     }
   ],
-  async execute(message, args) {
-    const playerId = args[0];
-    if (!playerId) return message.reply("❌ Provide a PlayFab ID");
+  async execute(interaction) {
+    const playerId = interaction.options.getString("id");
+    if (!playerId) return interaction.reply({ content: "❌ Provide a PlayFab ID", ephemeral: true });
 
-    PlayFab.PlayFabServer.UpdateUserData({
-      PlayFabId: playerId,
-      Data: { IsBanned: "0", BannedUntil: "" }
-    }, (err, result) => {
-      if (err) return message.reply(`❌ Error: ${err.errorMessage}`);
-      message.reply(`✅ Player ${playerId} unbanned`);
+    PlayFab.PlayFabServer.RevokeBans({ PlayFabId: playerId }, (err, result) => {
+      if (err) return interaction.reply({ content: `❌ Error: ${err.errorMessage}`, ephemeral: true });
+
+      interaction.reply({ content: `✅ Player ${playerId} has been unbanned.`, ephemeral: true });
     });
   }
 };

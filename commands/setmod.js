@@ -3,18 +3,26 @@ import GuildConfig from '../models/GuildConfig.js';
 export default {
   name: "setmod",
   description: "Add a user to the bot moderators list",
-  async execute(message, args) {
-    const user = message.mentions.users.first();
-    if (!user) return message.reply("Mention a user");
+  options: [
+    {
+      name: "user",
+      description: "Select a user to make moderator",
+      type: 6, // USER type
+      required: true
+    }
+  ],
+  async execute(interaction) {
+    const user = interaction.options.getUser("user");
+    if (!user) return interaction.reply({ content: "❌ Mention a user", ephemeral: true });
 
-    let cfg = await GuildConfig.findOne({ guildId: message.guild.id });
-    if (!cfg) cfg = await GuildConfig.create({ guildId: message.guild.id });
+    let cfg = await GuildConfig.findOne({ guildId: interaction.guildId });
+    if (!cfg) cfg = await GuildConfig.create({ guildId: interaction.guildId });
 
     if (!cfg.mods.includes(user.id)) {
       cfg.mods.push(user.id);
       await cfg.save();
     }
 
-    message.reply(`${user.tag} is now a bot moderator.`);
+    return interaction.reply({ content: `${user.tag} is now a bot moderator.`, ephemeral: true });
   }
 };
