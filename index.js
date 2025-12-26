@@ -1,9 +1,11 @@
+// index.js (pełen plik - podmień oryginał)
 import { Client, GatewayIntentBits, Collection, REST, Routes } from 'discord.js';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
+import ocrHandler from './events/messageCreate.ocr.js'; // <-- import OCR handler
 
 const config = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url), 'utf-8'));
 
@@ -82,50 +84,59 @@ async function hasPermission(userId, guildId, guildOwnerId) {
   return cfg?.mods.includes(userId) || false;
 }
 
-// --- MESSAGE COMMAND HANDLER ---
+// --- MESSAGE COMMAND HANDLER (prefix) ---
 client.on('messageCreate', async message => {
-  if (message.author.bot || !message.guild) return;
-  const prefix = await getPrefix(message.guild.id);
-  if (!message.content.startsWith(prefix)) return;
+  try {
+    if (message.author.bot || !message.guild) return;
 
-  const args = message.content.slice(prefix.length).trim().split(/ +/);
-  const commandName = args.shift().toLowerCase();
-  const command = client.commands.get(commandName);
-  if (!command) return;
+    // call OCR handler (fire-and-forget)
+    ocrHandler(message).catch(err => console.error('OCR error:', err));
 
-  const allowed = await hasPermission(message.author.id, message.guild.id, message.guild.ownerId);
-  if (!allowed) return message.reply("❌ You don't have permission to use this command.");
+    const prefix = await getPrefix(message.guild.id);
+    if (!message.content.startsWith(prefix)) return;
 
-  try { await command.execute(message, args); } 
-  catch (err) { console.error(err); message.reply("❌ Command error"); }
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const commandName = args.shift().toLowerCase();
+    const command = client.commands.get(commandName);
+    if (!command) return;
+
+    const allowed = await hasPermission(message.author.id, message.guild.id, message.guild.ownerId);
+    if (!allowed) return message.reply("❌ You don't have permission to use this command.");
+
+    try { await command.execute(message, args); } 
+    catch (err) { console.error(err); message.reply("❌ Command error"); }
+  } catch (err) {
+    console.error('messageCreate handler error:', err);
+  }
 });
 
 // --- SLASH COMMAND HANDLER ---
 client.on('interactionCreate', async interaction => {
-  if (!interaction.isChatInputCommand()) return;
-  const cmd = client.commands.get(interaction.commandName);
-  if (!cmd) return;
+  try {
+    if (!interaction.isChatInputCommand()) return;
+    const cmd = client.commands.get(interaction.commandName);
+    if (!cmd) return;
 
-  const args = cmd.options?.map(opt => interaction.options.get(opt.name)?.value) || [];
+    // build args from options (ordered as in cmd.options)
+    const args = cmd.options?.map(opt => interaction.options.get(opt.name)?.value) || [];
 
-  const allowed = await hasPermission(interaction.user.id, interaction.guildId, interaction.guild.ownerId);
-  if (!allowed) return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
+    // fetch guild to get ownerId if needed
+    const guild = interaction.guild ?? await client.guilds.fetch(interaction.guildId).catch(()=>null);
+    const allowed = await hasPermission(interaction.user.id, guild?.id, guild?.ownerId);
+    if (!allowed) return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
 
-  const fakeMsg = {
-    guild: interaction.guild,
-    author: interaction.user,
-    member: interaction.member,
-    channel: interaction.channel,
-    client,
-    reply: (contentOrOptions) => {
-      if (typeof contentOrOptions === 'string') 
-        return interaction.reply({ content: contentOrOptions, ephemeral: false });
-      return interaction.reply({ ...contentOrOptions, ephemeral: false });
+    try {
+      // pass the real interaction object (commands handle both message and interaction)
+      await cmd.execute(interaction, args);
+    } catch (err) {
+      console.error(err);
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: '❌ Slash command error', ephemeral: true });
+      }
     }
-  };
-
-  try { await cmd.execute(fakeMsg, args); }
-  catch (err) { console.error(err); interaction.reply({ content: '❌ Slash command error', ephemeral: true }); }
+  } catch (err) {
+    console.error('interactionCreate handler error:', err);
+  }
 });
 
 // --- LOGIN ---
