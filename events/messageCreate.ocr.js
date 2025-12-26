@@ -253,6 +253,6 @@ async function tryVariantsAndRespond(base, message) {
   if (fallback.length === 16) {
     await message.channel.send(`ID: ${fallback}`);
   } else {
-    await message.channel.send('❌ Nie udało się jednoznacznie odczytać ID (spróbuj zrobić screenshot z lepszym kontrastem).');
+    await message.channel.send('❌ Failed to clearly read the ID (try taking a screenshot with better contrast)');
   }
 }
