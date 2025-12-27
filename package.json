@@ -4,10 +4,12 @@
   "main": "index.js",
   "type": "module",
   "dependencies": {
+    "axios": "^1.13.2",
     "discord.js": "^14.14.0",
     "dotenv": "^16.3.0",
-    "mongoose": "^7.3.0",
-    "playfab-sdk": "^2.180.250815",
+    "mongoose": "^7.8.8",
+    "mysql2": "^3.16.0",
+    "playfab-sdk": "^2.187.251205",
     "sharp": "^0.34.5",
     "tesseract.js": "^7.0.0"
   }
