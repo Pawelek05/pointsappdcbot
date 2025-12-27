@@ -13,6 +13,7 @@ export default {
 \`modlist\` - Show app moderators list
 \`reward\` - Coin app rewards
 \`addcreature\` - Add creature for player
+\`creaturelist\` - List of creatures ids
     `;
     return replySafe(interactionOrMessage, helpText, { ephemeral: isInteraction(interactionOrMessage) });
   }

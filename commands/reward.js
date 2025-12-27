@@ -1,4 +1,4 @@
-// commands/reward.js (updated - PYAN endpoint normalization + better error handling)
+// commands/reward.js
 import PlayFab from 'playfab-sdk';
 import axios from 'axios';
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
@@ -328,3 +328,197 @@ export default {
                 const amount = Number(reward.amount ?? reward.price) || 1;
                 const maxWords = amount * 2;
                 const question = amount > 1 ? "What creatures do you want? (max " + maxWords + " words)" : "What creature do you want? (max " + maxWords + " words)";
+                // loop until valid or timeout per attempt
+                while (true) {
+                  await dmChannel.send(question);
+                  const replyCol = await dmChannel.awaitMessages({ filter, max: 1, time: 2 * 60 * 1000 });
+                  if (!replyCol || replyCol.size === 0) {
+                    await dmChannel.send("⏲️ No answer received — cancelled.");
+                    // refund to be safe because player didn't specify what they want
+                    try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch (e) { console.error('Refund failed on timeout after creature prompt', e); }
+                    return;
+                  }
+                  const reply = replyCol.first().content.trim();
+                  const words = reply.split(/\s+/).filter(Boolean);
+                  if (words.length === 0) {
+                    await dmChannel.send(`❌ Invalid answer. Please provide up to ${maxWords} words describing the creature(s). Try again.`);
+                    continue;
+                  }
+                  if (words.length > maxWords) {
+                    await dmChannel.send(`❌ Too many words. You may provide up to ${maxWords} words but you provided ${words.length}. Try again.`);
+                    continue;
+                  }
+                  // accepted
+                  whatHeWants = reply;
+                  break;
+                }
+              }
+
+              const manualEmbed = new EmbedBuilder()
+                .setTitle("Manual Reward Required")
+                .setColor(manualColor)
+                .setDescription("This reward requires manual granting by an administrator. React with ✅ when you've granted it.")
+                .addFields(
+                  { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
+                  { name: "PlayFab ID", value: `${playfabId}`, inline: true },
+                  { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
+                  { name: "Reward", value: `${reward.name} (${reward.rewardId})`, inline: true },
+                  { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
+                  { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
+                  { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
+                  { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true },
+                  { name: "GuildId", value: `${guildId}`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: "React with ✅ when you manually grant this reward" });
+
+              if (whatHeWants) {
+                manualEmbed.addFields({ name: "What he wants:", value: String(whatHeWants) });
+              } else {
+                manualEmbed.addFields({ name: "What he wants:", value: "—" });
+              }
+
+              const sent = await channel.send({ embeds: [manualEmbed] });
+              try { await sent.react('✅'); } catch (e) { console.error('React failed', e); }
+
+              await dmChannel.send("✅ Your Money has been deducted. Administrators have been notified and will grant your reward manually. You will receive a DM when it is granted.");
+              try { await btnInt.editReply({ content: `✅ Done — administrators were notified.`, ephemeral: true }); } catch {}
+              return;
+            } catch (err) {
+              console.error("Manual reward alert failed:", err);
+              try {
+                await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
+                return dmChannel.send("❌ Failed to notify administrators about manual reward. Your money has been refunded. Contact admins.");
+              } catch (refundErr) {
+                console.error("Refund failed:", refundErr);
+                return dmChannel.send("‼️ Failed to notify administrators and refund money — contact admins immediately.");
+              }
+            }
+          }
+
+        } catch (err) {
+          console.error("DM flow error:", err);
+          try { await btnInt.user.send("❌ An error occurred during the claim process. Try again later."); } catch {}
+        }
+      });
+
+      collector.on('end', () => {
+        const disabledRows = rows.map(r => {
+          r.components.forEach(c => c.setDisabled(true));
+          return r;
+        });
+        if (message && message.edit) {
+          message.edit({ components: disabledRows }).catch(()=>{});
+        } else if (interactionOrMessage && interactionOrMessage.editReply) {
+          interactionOrMessage.editReply({ components: disabledRows }).catch(()=>{});
+        }
+      });
+
+      return;
+    }
+
+    // --- CHANNEL (mods only) ---
+    if (sub === "channel") {
+      if (!isInt) return replySafe(interactionOrMessage, "❌ Use the slash command to set the channel.", { ephemeral: true });
+      const isModerator = await isMod(userId, guildId);
+      if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can set the reward channel.", { ephemeral: true });
+
+      const channelOption = interactionOrMessage.options.getChannel("channel");
+      if (!channelOption) return replySafe(interactionOrMessage, "❌ Channel not provided or invalid.", { ephemeral: true });
+
+      try {
+        await GuildConfig.findOneAndUpdate(
+          { guildId },
+          { $set: { rewardChannelId: channelOption.id, rewardAlerts: true } },
+          { upsert: true }
+        );
+        return replySafe(interactionOrMessage, `✅ Reward alerts channel set to <#${channelOption.id}> and alerts enabled.`, { ephemeral: true });
+      } catch (err) {
+        console.error("Error setting reward channel:", err);
+        return replySafe(interactionOrMessage, `❌ Failed to set channel: ${err.message}`, { ephemeral: true });
+      }
+    }
+
+    // --- ALERTS toggle (mods only) ---
+    if (sub === "alerts") {
+      const isModerator = await isMod(userId, guildId);
+      if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can toggle alerts.", { ephemeral: true });
+
+      try {
+        const cfg = await GuildConfig.findOne({ guildId });
+        if (!cfg) {
+          const newCfg = new GuildConfig({ guildId, rewardAlerts: false });
+          await newCfg.save();
+          return replySafe(interactionOrMessage, `✅ Reward alerts toggled: **disabled**. Use /reward channel to set channel and enable.`, { ephemeral: true });
+        } else {
+          cfg.rewardAlerts = !cfg.rewardAlerts;
+          await cfg.save();
+          return replySafe(interactionOrMessage, `✅ Reward alerts toggled: **${cfg.rewardAlerts ? 'enabled' : 'disabled'}**.`, { ephemeral: true });
+        }
+      } catch (err) {
+        console.error("Error toggling reward alerts:", err);
+        return replySafe(interactionOrMessage, `❌ Failed to toggle alerts: ${err.message}`, { ephemeral: true });
+      }
+    }
+
+    // --- ADD / REMOVE / LIST (mods only) ---
+    if (sub === "add") {
+      const isModerator = await isMod(userId, guildId);
+      if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can add rewards.", { ephemeral: true });
+
+      const rewardId = getStringOption(interactionOrMessage, "id", args, 0);
+      const name = getStringOption(interactionOrMessage, "name", args, 1);
+      const priceVal = getIntegerOption(interactionOrMessage, "price", args, 2);
+      const amountVal = getIntegerOption(interactionOrMessage, "amount", args, 3);
+      const price = priceVal !== null ? Number(priceVal) : NaN;
+      const amount = amountVal !== null ? Number(amountVal) : NaN;
+      const emoji = getStringOption(interactionOrMessage, "emoji", args, 4) || null;
+
+      if (!rewardId || !name || Number.isNaN(price) || Number.isNaN(amount)) return replySafe(interactionOrMessage, "❌ Invalid arguments. Usage: id, name, price, amount", { ephemeral: true });
+
+      try {
+        const exists = await Reward.findOne({ guildId, rewardId });
+        if (exists) return replySafe(interactionOrMessage, `❌ Reward with ID \`${rewardId}\` already exists.`, { ephemeral: true });
+        const r = new Reward({ guildId, rewardId, name, price, amount, emoji });
+        await r.save();
+        return replySafe(interactionOrMessage, `✅ Added reward **${name}** — Grants **${amount}** for ${coinEmoji}${price}.`, { ephemeral: true });
+      } catch (err) {
+        console.error(err);
+        return replySafe(interactionOrMessage, `❌ Error adding reward: ${err.message}`, { ephemeral: true });
+      }
+    }
+
+    if (sub === "remove") {
+      const isModerator = await isMod(userId, guildId);
+      if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can remove rewards.", { ephemeral: true });
+      const rewardId = getStringOption(interactionOrMessage, "id", args, 0);
+      if (!rewardId) return replySafe(interactionOrMessage, "❌ Provide reward ID.", { ephemeral: true });
+      const found = await Reward.findOneAndDelete({ guildId, rewardId });
+      if (!found) return replySafe(interactionOrMessage, `❌ Reward \`${rewardId}\` not found.`, { ephemeral: true });
+      return replySafe(interactionOrMessage, `✅ Removed reward \`${rewardId}\`.`, { ephemeral: true });
+    }
+
+    if (sub === "list") {
+      const isModerator = await isMod(userId, guildId);
+      if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can view rewards list.", { ephemeral: true });
+      const rewards = await Reward.find({ guildId }).sort({ price: 1 }).lean();
+      if (!rewards.length) return replySafe(interactionOrMessage, "❌ No rewards.", { ephemeral: true });
+
+      const embed = new EmbedBuilder()
+        .setTitle("Rewards list")
+        .setColor(embedColor)
+        .setDescription(`ID • Reward name • Amount • Price (${coinEmoji} Money)`);
+
+      for (const r of rewards) {
+        embed.addFields({
+          name: `ID: \`${r.rewardId}\` — ${r.name}`,
+          value: `Amount: **${r.amount ?? r.price}** • Price: ${coinEmoji}${r.price}`,
+        });
+      }
+
+      return replySafe(interactionOrMessage, null, { embeds: [embed], ephemeral: true });
+    }
+
+    return replySafe(interactionOrMessage, "Use subcommands: claim / add / remove / list / channel / alerts", { ephemeral: true });
+  }
+};

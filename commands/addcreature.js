@@ -9,7 +9,7 @@ export default {
   description: "Add a creature to a player's inventory (mods only)",
   options: [
     { name: "cardwarsid", description: "CardWars ID (multiplayer name or username)", type: 3, required: true },
-    { name: "creature", description: "Creature ID (/creatureslist)", type: 3, required: true },
+    { name: "creature", description: "Creature ID (/creaturelist)", type: 3, required: true },
     { name: "starrating", description: "Star rating (1-5) - optional", type: 4, required: false }
   ],
   async execute(interactionOrMessage, args = []) {
