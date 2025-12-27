@@ -165,14 +165,14 @@ client.on('interactionCreate', async interaction => {
 });
 
 // --- Reaction handler for manual grants ---
+// messageReactionAdd handler — replace existing one in index.js
 client.on('messageReactionAdd', async (reaction, user) => {
   try {
-    // debug: log reaction events (temporary)
-    console.log('[REACTION EVENT] user=', user.id, 'emoji=', reaction.emoji?.name, 'partial=', reaction.partial);
-
     if (user.bot) return;
 
-    // fetch if partial
+    console.log('[REACTION EVENT] user=', user.id, 'emoji=', reaction.emoji?.name, 'partial=', reaction.partial);
+
+    // fetch partials if necessary
     if (reaction.partial) {
       try { await reaction.fetch(); } catch (e) { console.error('Failed to fetch reaction partial', e); return; }
     }
@@ -181,23 +181,25 @@ client.on('messageReactionAdd', async (reaction, user) => {
       try { await message.fetch(); } catch (e) { console.error('Failed to fetch message partial', e); return; }
     }
 
-    // only care about ✅
+    // Only process the green check emoji
     if (reaction.emoji.name !== '✅') return;
 
     const embed = message.embeds?.[0];
     if (!embed) {
-      console.log('[REACTION] message has no embed, ignoring');
+      console.log('[REACTION] no embed -> ignore');
       return;
     }
     if (embed.title !== 'Manual Reward Required') {
-      console.log('[REACTION] embed title not manual reward required, ignoring:', embed.title);
+      console.log('[REACTION] embed title not Manual Reward Required -> ignore:', embed.title);
       return;
     }
 
-    // already processed?
-    const grantedField = (embed.fields || []).find(f => f.name === 'Granted by');
-    if (grantedField) {
-      console.log('[REACTION] already granted, ignoring');
+    // Already processed?
+    const already = (embed.fields || []).some(f => f.name === 'Granted by');
+    if (already) {
+      console.log('[REACTION] already granted -> ignore');
+      // Optionally remove reactor's reaction to clean up UX
+      try { await reaction.users.remove(user.id).catch(()=>{}); } catch {}
       return;
     }
 
@@ -208,7 +210,9 @@ client.on('messageReactionAdd', async (reaction, user) => {
     // check moderator rights
     const allowed = await isMod(user.id, guildId);
     if (!allowed) {
-      console.log('[REACTION] user is not mod, ignoring', user.id);
+      console.log('[REACTION] reactor is not mod, ignoring', user.id);
+      // remove the user's reaction so it's not left behind (optional)
+      try { await reaction.users.remove(user.id).catch(()=>{}); } catch {}
       return;
     }
 
@@ -217,12 +221,19 @@ client.on('messageReactionAdd', async (reaction, user) => {
     const discordIdMatch = discordUserField.match(/\((\d{16,20})\)$/);
     const discordId = discordIdMatch ? discordIdMatch[1] : null;
 
-    // build new embed: mark granted by
+    // Build new embed: change title, color and add "Granted by" field
     const newEmbed = EmbedBuilder.from(embed)
-      .setColor(0x2ECC71)
-      .addFields({ name: 'Granted by', value: `${user.tag} (${user.id})`, inline: true });
+      .setTitle('Reward granted by administrator')
+      .setColor(0x2ECC71) // green
+      // remove any existing 'Granted by' field to avoid duplicates, then add
+      ;
 
-    // edit the message
+    // Remove existing Granted by if present
+    const filteredFields = (newEmbed.data.fields || []).filter(f => f.name !== 'Granted by');
+    newEmbed.data.fields = filteredFields;
+    newEmbed.addFields({ name: 'Granted by', value: `${user.tag} (${user.id})`, inline: true });
+
+    // Edit message with new embed
     try {
       await message.edit({ embeds: [newEmbed] });
       console.log('[REACTION] edited manual reward message to mark granted');
@@ -230,25 +241,29 @@ client.on('messageReactionAdd', async (reaction, user) => {
       console.error('Failed to edit manual reward message', e);
     }
 
-    // DM the player
+    // Remove the entire ✅ reaction from message (requires MANAGE_MESSAGES)
+    try {
+      await reaction.remove(); // removes the reaction from message entirely
+      console.log('[REACTION] removed reaction from message');
+    } catch (e) {
+      console.warn('[REACTION] could not remove full reaction (maybe missing MANAGE_MESSAGES). Trying to remove only moderator\'s reaction.', e?.message || e);
+      try { await reaction.users.remove(user.id).catch(()=>{}); } catch (e2) { console.warn('Failed fallback removal of user reaction', e2); }
+    }
+
+    // DM the player informing that admin granted the reward
     if (discordId) {
       try {
         const player = await client.users.fetch(discordId).catch(()=>null);
         if (player) {
-          await player.send(`Your requested reward **${embed.fields.find(f=>f.name==='Reward')?.value ?? 'unknown'}** has been **granted** by ${user.tag}. Congratulations!`).catch(()=>{});
+          const rewardName = embed.fields.find(f => f.name === 'Reward')?.value ?? 'unknown';
+          await player.send(`Your requested reward **${rewardName}** has been **granted** by ${user.tag}. Congratulations!`).catch(() => {
+            console.warn('[REACTION] could not DM player (maybe DMs closed)');
+          });
           console.log('[REACTION] sent DM to player', discordId);
         }
       } catch (e) {
         console.error('Failed to DM player after manual grant', e);
       }
-    }
-
-    // try to remove reaction from the moderator to avoid duplicates
-    try {
-      // requires MANAGE_MESSAGES permission for bot in that channel
-      await reaction.users.remove(user.id);
-    } catch (e) {
-      console.warn('Could not remove moderator reaction (missing permission?):', e.message || e);
     }
 
   } catch (err) {
