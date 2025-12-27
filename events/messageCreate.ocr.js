@@ -1,10 +1,9 @@
 // events/messageCreate.ocr.js
-// Robust OCR handler with broad compatibility for different tesseract.js versions (including v7).
+// Robust OCR handler with improved post-processing to fix common OCR misreads (e.g. letters <-> numbers).
 // Sends only the ID (16 hex chars) when recognized. Messages in English.
 
 import GuildConfig from '../models/GuildConfig.js';
 import * as Tesseract from 'tesseract.js';
-import { createWorker as createWorkerNamed } from 'tesseract.js';
 import sharp from 'sharp';
 import PlayFab from 'playfab-sdk';
 
@@ -27,7 +26,8 @@ const CHAR_MAP = {
   'B':'8','b':'8',
   'G':'6','g':'9',
   'q':'9','P':'9',
-  'T':'7','t':'7'
+  'T':'7','t':'7',
+  'y':'Y' // keep, will be removed later if not hex
 };
 
 // ambiguity pools used to generate variants
@@ -45,7 +45,7 @@ const AMBIG = {
 function generateVariants(s) {
   const chars = s.split('');
   const pools = chars.map(ch => AMBIG[ch] || [ch]);
-  const MAX_VARIANTS = 256;
+  const MAX_VARIANTS = 512;
   let results = [''];
   for (const pool of pools) {
     const next = [];
@@ -62,115 +62,45 @@ function generateVariants(s) {
   return results;
 }
 
-// ---------- Recognition compatibility layer ----------
-// We'll try multiple strategies in order:
-// 1) Tesseract.recognize (if exported as function or on default)
-// 2) createWorker -> use worker.recognize (without forcing load/init) for versions that support it
-// 3) fallback to failing gracefully (ask user to install a compatible version)
-
+// ---------- Recognition (compatibility-friendly) ----------
 async function tesseractRecognizeBuffer(buffer) {
-  // Strategy A: direct recognize functions on the imported namespace
   try {
-    // Prefer direct function on namespace
     if (typeof Tesseract.recognize === 'function') {
       try {
         const res = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
         return res?.data?.text ?? '';
-      } catch (err1) {
-        // try alternate signature (some builds want array)
+      } catch (e1) {
         try {
           const res2 = await Tesseract.recognize(buffer, ['eng'], { logger: () => {} });
           return res2?.data?.text ?? '';
-        } catch (err2) {
-          console.warn('Tesseract.recognize attempts failed:', err1, err2);
+        } catch (e2) {
+          console.warn('Tesseract.recognize attempts failed:', e1, e2);
         }
       }
     }
-
-    // Some bundlers expose default
     if (Tesseract && typeof Tesseract.default === 'object' && typeof Tesseract.default.recognize === 'function') {
       try {
         const res = await Tesseract.default.recognize(buffer, 'eng', { logger: () => {} });
         return res?.data?.text ?? '';
-      } catch (err1) {
+      } catch (e1) {
         try {
           const res2 = await Tesseract.default.recognize(buffer, ['eng'], { logger: () => {} });
           return res2?.data?.text ?? '';
-        } catch (err2) {
-          console.warn('Tesseract.default.recognize attempts failed:', err1, err2);
+        } catch (e2) {
+          console.warn('Tesseract.default.recognize attempts failed:', e1, e2);
         }
       }
     }
   } catch (e) {
-    // continue to next strategy
     console.warn('Tesseract direct recognize detection error:', e);
   }
 
-  // Strategy B: try createWorker() if available. Some versions expose createWorker.
-  const createWorker = (typeof createWorkerNamed === 'function') ? createWorkerNamed : (Tesseract && typeof Tesseract.createWorker === 'function' ? Tesseract.createWorker : null);
-  if (createWorker) {
-    let worker = null;
-    try {
-      worker = createWorker();
-      // Many versions require load/init; others may accept recognize directly.
-      // We try calling recognize directly, if it errors we try load/init sequences guarded by try/catch.
-      if (typeof worker.recognize === 'function') {
-        try {
-          const r = await worker.recognize(buffer);
-          // optionally terminate worker if termination available
-          if (typeof worker.terminate === 'function') {
-            try { await worker.terminate(); } catch(e){/*ignore*/ }
-          }
-          return r?.data?.text ?? '';
-        } catch (err) {
-          // Try load -> loadLanguage -> initialize -> recognize (if those functions exist)
-          try {
-            if (typeof worker.load === 'function') await worker.load();
-            if (typeof worker.loadLanguage === 'function') {
-              try { await worker.loadLanguage(['eng']); } catch(e){ await worker.loadLanguage('eng'); }
-            }
-            if (typeof worker.initialize === 'function') await worker.initialize('eng');
-            if (typeof worker.setParameters === 'function') {
-              try {
-                await worker.setParameters({
-                  tessedit_char_whitelist: '0123456789ABCDEF:',
-                  tessedit_pageseg_mode: '7'
-                });
-              } catch(e){}
-            }
-            const r2 = await worker.recognize(buffer);
-            if (typeof worker.terminate === 'function') {
-              try { await worker.terminate(); } catch(e){/*ignore*/ }
-            }
-            return r2?.data?.text ?? '';
-          } catch (err2) {
-            // try to terminate
-            if (worker && typeof worker.terminate === 'function') {
-              try { await worker.terminate(); } catch(e){/*ignore*/ }
-            }
-            console.warn('Worker recognize attempts failed:', err, err2);
-          }
-        }
-      } else {
-        // worker has no recognize - give up on worker
-        if (worker && typeof worker.terminate === 'function') {
-          try { await worker.terminate(); } catch(e){/*ignore*/ }
-        }
-      }
-    } catch (e) {
-      // if worker creation fails, ignore and fall through
-      console.warn('createWorker attempt failed:', e);
-      try { if (worker && typeof worker.terminate === 'function') await worker.terminate(); } catch(e){/*ignore*/}
-    }
-  }
-
-  // If we reach here none of the above strategies worked.
-  console.error('Tesseract: no compatible recognize method found. Consider installing tesseract.js@2.1.5 for worker support or adjust your tesseract package.');
+  // If not found, return empty string - upstream will handle
+  console.error('Tesseract: no recognize method available in this environment.');
   return '';
 }
 
-// ---------- Preprocessing variants (aggressive, slower) ----------
-
+// ---------- Preprocessing (aggressive but slow) ----------
 function makeDilateKernel(size = 3) {
   const k = size * size;
   return { width: size, height: size, kernel: new Array(k).fill(1) };
@@ -179,7 +109,6 @@ function makeDilateKernel(size = 3) {
 async function buildAggressiveVariants(maskPngBuffer) {
   const variants = [];
 
-  // several thresholds
   const thresholds = [200, 180, 160, 140];
   for (const t of thresholds) {
     try {
@@ -193,7 +122,6 @@ async function buildAggressiveVariants(maskPngBuffer) {
     } catch (e) {}
   }
 
-  // upsample + convolve (thicken) + threshold
   try {
     const meta = await sharp(maskPngBuffer).metadata();
     const wup = Math.max(Math.round((meta.width || 100) * 2.5), 200);
@@ -202,19 +130,16 @@ async function buildAggressiveVariants(maskPngBuffer) {
     variants.push(dil);
   } catch (e) {}
 
-  // sharpen + normalize + threshold
   try {
     const v = await sharp(maskPngBuffer).grayscale().sharpen().normalize().threshold(150).toFormat('png').toBuffer();
     variants.push(v);
   } catch (e) {}
 
-  // median + sharpen + threshold
   try {
     const v = await sharp(maskPngBuffer).grayscale().median(1).sharpen().threshold(150).toFormat('png').toBuffer();
     variants.push(v);
   } catch (e) {}
 
-  // enlarge then light blur then threshold
   try {
     const meta = await sharp(maskPngBuffer).metadata();
     const upw = Math.max(Math.round((meta.width || 100) * 1.8), 150);
@@ -222,13 +147,11 @@ async function buildAggressiveVariants(maskPngBuffer) {
     variants.push(v);
   } catch (e) {}
 
-  // original last
   variants.push(maskPngBuffer);
-
   return variants;
 }
 
-// PlayFab validation helper
+// PlayFab validation
 async function tryValidatePlayFab(id) {
   if (!PLAYFAB_VALIDATE) return false;
   try {
@@ -241,8 +164,80 @@ async function tryValidatePlayFab(id) {
   return false;
 }
 
-// ---------- Main handler ----------
+// ---------- New robust candidate extraction ----------
 
+// Normalize raw OCR string aggressively (apply CHAR_MAP and uppercase)
+function aggressiveNormalize(raw) {
+  return raw.split('').map(ch => CHAR_MAP[ch] || ch).join('').toUpperCase();
+}
+
+// Return array of all possible substrings length 16 from normalized text (sliding window)
+function substringsOfLength16(norm) {
+  const res = [];
+  // keep only alphanum to slide (we keep letters too, we'll filter hex later)
+  const alnum = norm.replace(/[^A-Za-z0-9]/g, '');
+  if (alnum.length < 16) return res;
+  for (let i = 0; i <= alnum.length - 16; i++) {
+    res.push(alnum.slice(i, i + 16));
+  }
+  return res;
+}
+
+// hex purity: fraction of characters that are 0-9 A-F
+function hexPurity(s) {
+  if (!s || s.length === 0) return 0;
+  let ok = 0;
+  for (const ch of s) {
+    if (/[0-9A-F]/.test(ch)) ok++;
+  }
+  return ok / s.length;
+}
+
+// Build candidate map from all OCR results: substring -> count
+function buildSubstringVotes(ocrResults) {
+  const map = new Map();
+  for (const raw of ocrResults) {
+    const norm = aggressiveNormalize(raw);
+    // first, try to extract direct hex-like substrings (A-F0-9)
+    const hexMatches = norm.match(/[A-F0-9]{12,}/g);
+    if (hexMatches) {
+      for (const m of hexMatches) {
+        if (m.length === 16) {
+          map.set(m, (map.get(m) || 0) + 3); // direct hex match gets more weight
+        } else if (m.length > 16) {
+          // slide windows across it
+          for (let i = 0; i <= m.length - 16; i++) {
+            const s = m.slice(i, i+16);
+            map.set(s, (map.get(s) || 0) + 2);
+          }
+        } else {
+          // length 12-15, include as lower weight substrings when padded later
+          map.set(m, (map.get(m) || 0) + 1);
+        }
+      }
+    }
+    // Also add all sliding windows from full normalized (aggressive) string
+    const substrs = substringsOfLength16(norm);
+    for (const s of substrs) {
+      map.set(s, (map.get(s) || 0) + 1);
+    }
+  }
+  return map;
+}
+
+// Choose best candidate ordering by votes and hexPurity
+function rankCandidatesByScore(map) {
+  const arr = Array.from(map.entries()).map(([s,c]) => ({ s, c, purity: hexPurity(s) }));
+  // score: prioritize count then purity
+  arr.sort((a,b) => {
+    const sa = a.c * 100 + Math.round(a.purity * 100);
+    const sb = b.c * 100 + Math.round(b.purity * 100);
+    return sb - sa;
+  });
+  return arr.map(x => x.s);
+}
+
+// ---------- Main handler ----------
 export default async function ocrMessageHandler(message) {
   try {
     if (message.author?.bot) return;
@@ -264,7 +259,7 @@ export default async function ocrMessageHandler(message) {
     const filename = attachment.name || '';
     if (!attachment.contentType?.startsWith('image/') && !/\.(jpe?g|png|bmp|webp|gif)$/i.test(filename)) return;
 
-    // fetch the image
+    // fetch image
     const res = await fetch(attachment.url);
     if (!res.ok) return;
     const arrayBuffer = await res.arrayBuffer();
@@ -345,72 +340,80 @@ export default async function ocrMessageHandler(message) {
       return;
     }
 
-    // collect normalized candidates with votes
-    const candidates = new Map();
-    for (const rawText of ocrResults) {
-      let candidate = null;
-      const idMatch = rawText.match(/ID[:\-]?([A-Za-z0-9]+)/i);
-      if (idMatch) candidate = idMatch[1];
-      else {
-        const hexOnly = rawText.match(/[A-Fa-f0-9]{12,}/);
-        if (hexOnly) candidate = hexOnly[0];
+    // Build substring votes
+    const substrVotes = buildSubstringVotes(ocrResults);
+    const ranked = rankCandidatesByScore(substrVotes);
+
+    // Try ranked candidates -> validate via PlayFab or pick best purity if validation disabled
+    for (const cand of ranked) {
+      // ensure uppercase and remove non-alnum
+      const candidate = cand.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+      if (candidate.length !== 16) continue;
+      // quick sanity: ensure most chars are hex
+      if ((candidate.match(/[A-F0-9]/g) || []).length < 12) continue; // require at least 12 hex chars
+      if (PLAYFAB_VALIDATE) {
+        if (await tryValidatePlayFab(candidate)) {
+          await message.channel.send(candidate);
+          return;
+        }
+      } else {
+        await message.channel.send(candidate);
+        return;
       }
-      if (!candidate) continue;
-      const normalized = candidate.split('').map(ch => CHAR_MAP[ch] || ch).join('').toUpperCase();
-      candidates.set(normalized, (candidates.get(normalized) || 0) + 1);
     }
 
-    // sort candidates by votes
-    const sorted = Array.from(candidates.entries()).sort((a,b)=>b[1]-a[1]).map(e=>e[0]);
-
-    // helper to test candidate (direct or via variants) and optionally validate
-    async function testCandidate(candidate) {
-      const direct = candidate.match(PLAYFAB_ID_REGEX);
-      if (direct) {
-        const id = direct[0];
-        if (PLAYFAB_VALIDATE) {
-          const ok = await tryValidatePlayFab(id);
-          if (ok) { await message.channel.send(id); return true; }
-          return false;
-        } else {
-          await message.channel.send(id); return true;
+    // If none validated, try variants from top-ranked items
+    if (ranked.length > 0) {
+      for (const base of ranked.slice(0, 6)) { // limit attempts
+        const norm = base.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+        // generate variants
+        const vars = generateVariants(norm);
+        for (const v of vars) {
+          const candidate = v.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+          if (candidate.length !== 16) continue;
+          if ((candidate.match(/[A-F0-9]/g) || []).length < 12) continue;
+          if (PLAYFAB_VALIDATE) {
+            if (await tryValidatePlayFab(candidate)) {
+              await message.channel.send(candidate);
+              return;
+            }
+          } else {
+            await message.channel.send(candidate);
+            return;
+          }
         }
       }
-      // try variants
-      const vars = generateVariants(candidate);
-      for (const v of vars) {
-        const m = v.match(PLAYFAB_ID_REGEX);
-        if (!m) continue;
-        const id = m[0];
-        if (PLAYFAB_VALIDATE) {
-          const ok = await tryValidatePlayFab(id);
-          if (ok) { await message.channel.send(id); return true; }
-        } else {
-          await message.channel.send(id); return true;
-        }
+    }
+
+    // Final heuristic fallback: attempt to take the substring with highest hex purity among all sliding windows across all normalized OCR strings
+    let best = null;
+    let bestScore = -1;
+    for (const raw of ocrResults) {
+      const norm = aggressiveNormalize(raw).replace(/[^A-Za-z0-9]/g,'').toUpperCase();
+      for (let i = 0; i <= Math.max(0, norm.length - 16); i++) {
+        const s = norm.slice(i, i+16);
+        const purity = hexPurity(s);
+        const score = purity * 100 + (substrVotes.get(s) || 0);
+        if (score > bestScore) { bestScore = score; best = s; }
       }
-      return false;
+    }
+    if (best && best.length === 16 && (best.match(/[A-F0-9]/g) || []).length >= 10) {
+      // if PlayFab enabled try validate, else send
+      if (PLAYFAB_VALIDATE) {
+        if (await tryValidatePlayFab(best)) {
+          await message.channel.send(best);
+          return;
+        }
+        // if validation fails, still don't spam wrong id; return not found
+        await message.channel.send('❌ Failed to clearly read the ID (try a higher-contrast screenshot).');
+        return;
+      } else {
+        await message.channel.send(best);
+        return;
+      }
     }
 
-    // try sorted candidates
-    for (const cand of sorted) {
-      const ok = await testCandidate(cand);
-      if (ok) return;
-    }
-
-    // fallback: use most frequent OCR string aggressively normalized
-    const fallbackRaw = ocrResults[0] || '';
-    const fallbackCandidate = fallbackRaw.replace(/[^A-Za-z0-9]/g,'').split('').map(ch=>CHAR_MAP[ch]||ch).join('').toUpperCase();
-    const fbOk = await testCandidate(fallbackCandidate);
-    if (fbOk) return;
-
-    // final fallback: take alnum trimmed/padded to 16 if possible
-    const fallback2 = fallbackCandidate.replace(/[^A-Z0-9]/g,'').slice(0,16);
-    if (fallback2.length === 16) {
-      await message.channel.send(fallback2);
-      return;
-    }
-
+    // Nothing reliable found
     await message.channel.send('❌ Failed to clearly read the ID (try a higher-contrast screenshot).');
   } catch (err) {
     console.error('OCR handler error:', err);
