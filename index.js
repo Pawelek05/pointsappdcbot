@@ -21,12 +21,15 @@ if (!TOKEN || !CLIENT_ID || !MONGO_URI || !process.env.PLAYFAB_SECRET) {
   process.exit(1);
 }
 
+// --- CLIENT: add reaction intents! ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMessageReactions,    // <- REQUIRED for reaction events in guild channels
+    GatewayIntentBits.DirectMessageReactions    // <- REQUIRED for reaction events in DMs (if any)
   ],
   partials: [
     Partials.Channel,
@@ -164,8 +167,12 @@ client.on('interactionCreate', async interaction => {
 // --- Reaction handler for manual grants ---
 client.on('messageReactionAdd', async (reaction, user) => {
   try {
+    // debug: log reaction events (temporary)
+    console.log('[REACTION EVENT] user=', user.id, 'emoji=', reaction.emoji?.name, 'partial=', reaction.partial);
+
     if (user.bot) return;
 
+    // fetch if partial
     if (reaction.partial) {
       try { await reaction.fetch(); } catch (e) { console.error('Failed to fetch reaction partial', e); return; }
     }
@@ -174,34 +181,54 @@ client.on('messageReactionAdd', async (reaction, user) => {
       try { await message.fetch(); } catch (e) { console.error('Failed to fetch message partial', e); return; }
     }
 
+    // only care about ✅
     if (reaction.emoji.name !== '✅') return;
 
     const embed = message.embeds?.[0];
-    if (!embed || embed.title !== 'Manual Reward Required') return;
+    if (!embed) {
+      console.log('[REACTION] message has no embed, ignoring');
+      return;
+    }
+    if (embed.title !== 'Manual Reward Required') {
+      console.log('[REACTION] embed title not manual reward required, ignoring:', embed.title);
+      return;
+    }
 
     // already processed?
-    const grantedField = embed.fields.find(f => f.name === 'Granted by');
-    if (grantedField) return;
+    const grantedField = (embed.fields || []).find(f => f.name === 'Granted by');
+    if (grantedField) {
+      console.log('[REACTION] already granted, ignoring');
+      return;
+    }
 
-    // extract guildId field (fallback to message.guild.id)
-    const guildIdField = embed.fields.find(f => f.name === 'GuildId');
+    // extract guildId (fallback to message.guild.id)
+    const guildIdField = (embed.fields || []).find(f => f.name === 'GuildId');
     const guildId = guildIdField?.value ?? (message.guild?.id ?? null);
 
-    // check moderator
+    // check moderator rights
     const allowed = await isMod(user.id, guildId);
-    if (!allowed) return;
+    if (!allowed) {
+      console.log('[REACTION] user is not mod, ignoring', user.id);
+      return;
+    }
 
-    // extract discord id
-    const discordUserField = embed.fields.find(f => f.name === 'Discord user')?.value || '';
+    // parse discord id from embed Discord user field
+    const discordUserField = (embed.fields || []).find(f => f.name === 'Discord user')?.value || '';
     const discordIdMatch = discordUserField.match(/\((\d{16,20})\)$/);
     const discordId = discordIdMatch ? discordIdMatch[1] : null;
 
-    // edit embed: mark granted
+    // build new embed: mark granted by
     const newEmbed = EmbedBuilder.from(embed)
       .setColor(0x2ECC71)
       .addFields({ name: 'Granted by', value: `${user.tag} (${user.id})`, inline: true });
 
-    await message.edit({ embeds: [newEmbed] }).catch(err => console.error('Failed to edit manual reward message', err));
+    // edit the message
+    try {
+      await message.edit({ embeds: [newEmbed] });
+      console.log('[REACTION] edited manual reward message to mark granted');
+    } catch (e) {
+      console.error('Failed to edit manual reward message', e);
+    }
 
     // DM the player
     if (discordId) {
@@ -209,14 +236,21 @@ client.on('messageReactionAdd', async (reaction, user) => {
         const player = await client.users.fetch(discordId).catch(()=>null);
         if (player) {
           await player.send(`Your requested reward **${embed.fields.find(f=>f.name==='Reward')?.value ?? 'unknown'}** has been **granted** by ${user.tag}. Congratulations!`).catch(()=>{});
+          console.log('[REACTION] sent DM to player', discordId);
         }
       } catch (e) {
         console.error('Failed to DM player after manual grant', e);
       }
     }
 
-    // optionally remove the reaction from the moderator
-    try { await reaction.users.remove(user.id).catch(()=>{}); } catch (e) {}
+    // try to remove reaction from the moderator to avoid duplicates
+    try {
+      // requires MANAGE_MESSAGES permission for bot in that channel
+      await reaction.users.remove(user.id);
+    } catch (e) {
+      console.warn('Could not remove moderator reaction (missing permission?):', e.message || e);
+    }
+
   } catch (err) {
     console.error('messageReactionAdd handler error:', err);
   }
