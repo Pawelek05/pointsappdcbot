@@ -2,32 +2,35 @@
 import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import GuildConfig from '../index.js';
+import GuildConfig from '../models/GuildConfig.js';
 
 // resolve __dirname in ESM
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// load config.json safely (no import assertion needed)
+// load config.json safely (no import assertion)
 let config = {};
 try {
   const cfgPath = path.join(__dirname, '..', 'config.json');
   const raw = readFileSync(cfgPath, 'utf8');
   config = JSON.parse(raw);
+  config.ownerId = config.ownerId ?? null;
 } catch (err) {
-  // jeśli nie uda się wczytać pliku, logujemy błąd i fallbackujemy do bezpiecznych wartości
-  console.error('Failed to load config.json in utils/isMod.js:', err);
+  console.error('utils/isMod.js: failed to load config.json:', err);
   config = { ownerId: null };
 }
 
 export default async function isMod(userId, guildId) {
   if (!userId) return false;
-  if (config.ownerId && userId === config.ownerId) return true;
+
+  // owner from config.json has full rights
+  if (config.ownerId && String(userId) === String(config.ownerId)) return true;
 
   try {
-    const cfg = await GuildConfig.findOne({ guildId });
+    const cfg = await GuildConfig.findOne({ guildId: String(guildId) });
     const mods = cfg?.mods ?? [];
-    return Array.isArray(mods) && mods.includes(userId);
+    // ensure both compared values are strings
+    return Array.isArray(mods) && mods.map(String).includes(String(userId));
   } catch (err) {
     console.error('isMod - DB error:', err);
     return false;
