@@ -54,21 +54,19 @@ export default {
       const rewards = await Reward.find({ guildId }).sort({ price: 1 }).lean();
       if (!rewards.length) return replySafe(interactionOrMessage, "❌ No rewards configured on this server.", { ephemeral: true });
 
-      // build embed (no IDs shown here)
+      // build tidy description: each reward in its own block (name + price), no ID, no amount
+      let desc = `Choose a reward by pressing the button below. Price is shown with ${coinEmoji}.\n\n`;
+      for (const r of rewards) {
+        const lineEmoji = r.emoji ? `${r.emoji} ` : '';
+        desc += `${lineEmoji}**${r.name}**\nPrice: ${coinEmoji}${r.price}\n\n`;
+      }
+
       const embed = new EmbedBuilder()
         .setTitle("Available rewards")
         .setColor(embedColor)
-        .setDescription(`Choose a reward by pressing the button below. Price is shown with ${coinEmoji}.`);
+        .setDescription(desc.trim());
 
-      for (const r of rewards) {
-        const amt = r.amount ?? r.price;
-        embed.addFields({
-          name: `${r.emoji ? `${r.emoji} ` : ''}${r.name}`,
-          value: `Grants: **${amt}** • Price: ${coinEmoji}${r.price}`,
-        });
-      }
-
-      // build buttons: label = name only (no coin emoji)
+      // build buttons: label = name only (no coin emoji, no ID)
       const rows = [];
       for (let i = 0; i < rewards.length; i += 5) {
         const slice = rewards.slice(i, i + 5);
@@ -86,15 +84,14 @@ export default {
 
       await replySafe(interactionOrMessage, null, { embeds: [embed], components: rows });
 
-      // try to get a message object for collector
+      // fetch message if possible, create collector
       let message = null;
       if (isInt) {
         try { message = await interactionOrMessage.fetchReply(); } catch {}
       }
-
       const collectorSource = message ?? interactionOrMessage;
       const collector = collectorSource.createMessageComponentCollector ? collectorSource.createMessageComponentCollector({ time: 5 * 60 * 1000 }) : null;
-      if (!collector) return; // no collector support in this environment
+      if (!collector) return;
 
       collector.on('collect', async (btnInt) => {
         await btnInt.deferReply({ ephemeral: true });
@@ -151,7 +148,6 @@ export default {
           if (isGems) {
             const endpoint = process.env.PYAN_ENDPOINT;
             if (!endpoint) {
-              // refund
               try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
               return dmChannel.send("❌ Server endpoint not configured (PYAN_ENDPOINT). Contact an admin.");
             }
@@ -171,7 +167,6 @@ export default {
               };
               if (!apiKey) {
                 if (!adminUser || !adminPass) {
-                  // refund
                   try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                   return dmChannel.send("❌ Server auth not configured. Contact an admin.");
                 }
@@ -182,7 +177,6 @@ export default {
             } catch (err) {
               const errMsg = err.response?.data?.error ?? err.message ?? String(err);
               console.error("Grant call failed:", errMsg);
-              // refund
               try {
                 await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
                 return dmChannel.send(`❌ Grant failed: ${errMsg}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
@@ -203,7 +197,6 @@ export default {
               }
             }
           } else {
-            // not a gems-type reward: currently not implemented on the game backend -> refund & inform
             try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
             return dmChannel.send("⚠️ This reward type is not implemented on the game backend. Contact admins.");
           }
@@ -216,7 +209,7 @@ export default {
               { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
               { name: "PlayFab ID", value: `${playfabId}`, inline: true },
               { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
-              { name: "Reward", value: `${reward.name} (${reward.rewardId})`, inline: true },
+              { name: "Reward", value: `${reward.name}`, inline: true },
               { name: "Amount granted", value: `**${reward.amount ?? reward.price}**`, inline: true },
               { name: "Price deducted", value: `${coinEmoji}${reward.price}`, inline: true },
               { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
@@ -227,11 +220,9 @@ export default {
 
           await dmChannel.send({ embeds: [resultEmbed] });
 
-          // also edit the ephemeral reply to user who clicked the button (already ephemeral) to confirm
           try {
             await btnInt.editReply({ content: `✅ Done — check your DMs for details.`, ephemeral: true });
           } catch {}
-
         } catch (err) {
           console.error("DM flow error:", err);
           try { await btnInt.user.send("❌ An error occurred during the claim process. Try again later."); } catch {}
@@ -239,7 +230,6 @@ export default {
       });
 
       collector.on('end', () => {
-        // disable buttons visually
         const disabledRows = rows.map(r => {
           r.components.forEach(c => c.setDisabled(true));
           return r;
@@ -304,7 +294,6 @@ export default {
         .setColor(embedColor)
         .setDescription(`ID • Reward name • Amount • Price (${coinEmoji} Money)`);
 
-      // add each reward as a field showing ID explicitly (admins want that here)
       for (const r of rewards) {
         embed.addFields({
           name: `ID: \`${r.rewardId}\` — ${r.name}`,
