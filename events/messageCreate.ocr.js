@@ -1,10 +1,9 @@
 // events/messageCreate.ocr.js
-// Robust OCR handler with compatibility fallback for different tesseract.js versions.
+// Robust OCR handler using Tesseract.recognize (compatible with tesseract.js v7).
 // Sends only the ID (16 hex chars) when recognized. Messages in English.
 
 import GuildConfig from '../models/GuildConfig.js';
 import * as Tesseract from 'tesseract.js';
-import { createWorker as createWorkerNamed } from 'tesseract.js'; // may or may not exist depending on version
 import sharp from 'sharp';
 import PlayFab from 'playfab-sdk';
 
@@ -62,135 +61,28 @@ function generateVariants(s) {
   return results;
 }
 
-// ---------- Tesseract compatibility layer ----------
+// ---------- Recognition (fallback-only) ----------
+// Using Tesseract.recognize to remain compatible with tesseract.js v7+.
 
-// We'll try to use a worker if available and has the expected API.
-// If not, fall back to calling Tesseract.recognize directly.
-let tessWorkerPromise = null;
-let useFallbackRecognize = false;
-
-async function initTesseractWorker() {
-  // If a previously failed attempt set fallback, short-circuit
-  if (useFallbackRecognize) return null;
-
-  if (tessWorkerPromise) return tessWorkerPromise;
-
-  tessWorkerPromise = (async () => {
-    try {
-      // Prefer named createWorker if available
-      const createWorker = typeof createWorkerNamed === 'function' ? createWorkerNamed : (Tesseract && typeof Tesseract.createWorker === 'function' ? Tesseract.createWorker : null);
-
-      if (!createWorker) {
-        // No createWorker available — fall back
-        useFallbackRecognize = true;
-        tessWorkerPromise = null;
-        return null;
-      }
-
-      const worker = createWorker({
-        // logger: m => console.log('[tess]', m)
-      });
-
-      // Some tesseract.js versions expose load as async fn on worker, some expect other flow.
-      // We attempt to call load()/loadLanguage()/initialize(). If any step fails, fallback.
-      if (typeof worker.load !== 'function') {
-        // Unexpected API — fallback
-        useFallbackRecognize = true;
-        tessWorkerPromise = null;
-        return null;
-      }
-
-      await worker.load();
-
-      // loadLanguage sometimes expects array; handle both possibilities
-      try {
-        if (typeof worker.loadLanguage === 'function') {
-          // Some versions accept an array, some accept a string. Try array first.
-          try {
-            await worker.loadLanguage(['eng']);
-          } catch (e1) {
-            // try string fallback
-            await worker.loadLanguage('eng');
-          }
-        }
-      } catch (e) {
-        // if language loading fails, fallback
-        console.warn('Tesseract: loadLanguage failed, falling back to recognize API.', e);
-        useFallbackRecognize = true;
-        tessWorkerPromise = null;
-        return null;
-      }
-
-      // initialize with language code
-      try {
-        if (typeof worker.initialize === 'function') {
-          await worker.initialize('eng');
-        }
-      } catch (e) {
-        console.warn('Tesseract: initialize failed, falling back.', e);
-        useFallbackRecognize = true;
-        tessWorkerPromise = null;
-        return null;
-      }
-
-      // set parameters - whitelist and page segmentation mode
-      try {
-        if (typeof worker.setParameters === 'function') {
-          await worker.setParameters({
-            tessedit_char_whitelist: '0123456789ABCDEF:',
-            tessedit_pageseg_mode: '7'
-          });
-        }
-      } catch (e) {
-        // not fatal; continue
-      }
-
-      return worker;
-    } catch (err) {
-      console.error('Tesseract worker initialization error:', err);
-      tessWorkerPromise = null;
-      useFallbackRecognize = true;
-      return null;
-    }
-  })();
-
-  return tessWorkerPromise;
-}
-
-// recognition function that works with worker or falls back to Tesseract.recognize
 async function tesseractRecognizeBuffer(buffer) {
-  // initialize worker attempt (if not yet attempted)
-  const worker = await initTesseractWorker();
-
-  if (useFallbackRecognize || !worker) {
-    // Fallback: use Tesseract.recognize directly
+  try {
+    // Try string 'eng' first; if that errors, try array ['eng'].
     try {
-      const res = await Tesseract.recognize(buffer, 'eng', {
-        logger: () => {}
-      });
+      const res = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
       return (res?.data?.text) ? res.data.text : '';
-    } catch (err) {
-      console.error('Tesseract fallback recognize error:', err);
-      return '';
-    }
-  } else {
-    // Use worker API
-    try {
-      const r = await worker.recognize(buffer);
-      return (r?.data?.text) ? r.data.text : '';
-    } catch (err) {
-      console.warn('Tesseract worker recognize error, switching to fallback:', err);
-      // mark fallback for next runs
-      useFallbackRecognize = true;
-      // try fallback now
+    } catch (e1) {
+      // fallback to array form (some versions require this)
       try {
-        const res = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
-        return (res?.data?.text) ? res.data.text : '';
-      } catch (err2) {
-        console.error('Tesseract fallback after worker failure also failed:', err2);
+        const res2 = await Tesseract.recognize(buffer, ['eng'], { logger: () => {} });
+        return (res2?.data?.text) ? res2.data.text : '';
+      } catch (e2) {
+        console.error('Tesseract.recognize failed (both tries):', e1, e2);
         return '';
       }
     }
+  } catch (err) {
+    console.error('Tesseract.recognize unexpected error:', err);
+    return '';
   }
 }
 
