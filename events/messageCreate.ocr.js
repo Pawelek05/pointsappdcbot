@@ -71,24 +71,32 @@ function generateVariants(s) {
   return results;
 }
 
-// Singleton Tesseract worker
+
 let tessWorkerPromise = null;
 async function getTessWorker() {
   if (!tessWorkerPromise) {
     tessWorkerPromise = (async () => {
-      const worker = createWorker({
-        // logger: m => console.log('[tess]', m)
-      });
-      await worker.load();
-      await worker.loadLanguage('eng');
-      await worker.initialize('eng');
-      // whitelist tylko hex (bez liter poza A-F) — Tesseract niebiesko zielone litery często myli,
-      // dopuszczamy dwukropek żeby zidentyfikować "ID:..." jeśli jest.
-      await worker.setParameters({
-        tessedit_char_whitelist: '0123456789ABCDEF:',
-        tessedit_pageseg_mode: '7' // single line
-      });
-      return worker;
+      try {
+        const worker = createWorker({
+          // logger: m => console.log('[tess]', m)
+        });
+
+        await worker.load();                        // load core
+        // Uwaga: loadLanguage oczekuje tablicy w wielu wersjach tesseract.js
+        await worker.loadLanguage(['eng']);         // <- tutaj podajemy tablicę
+        await worker.initialize('eng');             // initialize with language code (string)
+        // ustaw parametry - PSM jako string lub liczba działa, tutaj bezpiecznie jako '7'
+        await worker.setParameters({
+          tessedit_char_whitelist: '0123456789ABCDEF:', // tylko hex + colon
+          tessedit_pageseg_mode: '7' // treat the image as a single text line
+        });
+        return worker;
+      } catch (err) {
+        console.error('Tesseract worker initialization failed:', err);
+        // W razie niepowodzenia wyczyść promise, aby można było spróbować ponownie
+        tessWorkerPromise = null;
+        throw err;
+      }
     })();
   }
   return tessWorkerPromise;
