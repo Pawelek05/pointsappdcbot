@@ -46,7 +46,7 @@ export default {
     const guildId = interactionOrMessage.guild?.id;
     const userId = interactionOrMessage.user?.id ?? interactionOrMessage.author?.id;
 
-    // set PlayFab secret
+    // set PlayFab secret (must be in env)
     PlayFab.settings.developerSecretKey = process.env.PLAYFAB_SECRET;
 
     // --- CLAIM ---
@@ -54,11 +54,13 @@ export default {
       const rewards = await Reward.find({ guildId }).sort({ price: 1 }).lean();
       if (!rewards.length) return replySafe(interactionOrMessage, "❌ No rewards configured on this server.", { ephemeral: true });
 
-      // build tidy description: each reward in its own block (name + price), no ID, no amount
-      let desc = `Choose a reward by pressing the button below. Price is shown with ${coinEmoji}.\n\n`;
-      for (const r of rewards) {
+      // build tidy description: each reward in its own numbered block (number + name + price), no ID, no amount shown
+      let desc = `Choose a reward by pressing the numbered button below. Price is shown with ${coinEmoji}.\n\n`;
+      for (let idx = 0; idx < rewards.length; idx++) {
+        const r = rewards[idx];
         const lineEmoji = r.emoji ? `${r.emoji} ` : '';
-        desc += `${lineEmoji}**${r.name}**\nPrice: ${coinEmoji}${r.price}\n\n`;
+        const number = idx + 1;
+        desc += `**${number}.** ${lineEmoji}${r.name}\nPrice: ${coinEmoji}${r.price}\n\n`;
       }
 
       const embed = new EmbedBuilder()
@@ -66,16 +68,18 @@ export default {
         .setColor(embedColor)
         .setDescription(desc.trim());
 
-      // build buttons: label = name only (no coin emoji, no ID)
+      // build numbered buttons: label = number only (max 5 per row)
       const rows = [];
       for (let i = 0; i < rewards.length; i += 5) {
         const slice = rewards.slice(i, i + 5);
         const row = new ActionRowBuilder();
-        for (const r of slice) {
+        for (let j = 0; j < slice.length; j++) {
+          const absoluteIndex = i + j; // index in rewards array
+          const label = `${absoluteIndex + 1}`; // user-visible number (1-based)
           row.addComponents(
             new ButtonBuilder()
-              .setCustomId(`reward_claim::${guildId}::${r.rewardId}`)
-              .setLabel(`${r.name}`)
+              .setCustomId(`reward_claim::${guildId}::${absoluteIndex}`)
+              .setLabel(label)
               .setStyle(ButtonStyle.Primary)
           );
         }
@@ -84,7 +88,7 @@ export default {
 
       await replySafe(interactionOrMessage, null, { embeds: [embed], components: rows });
 
-      // fetch message if possible, create collector
+      // try to fetch a message to create a collector; if not available, use interactionOrMessage as fallback
       let message = null;
       if (isInt) {
         try { message = await interactionOrMessage.fetchReply(); } catch {}
@@ -96,8 +100,17 @@ export default {
       collector.on('collect', async (btnInt) => {
         await btnInt.deferReply({ ephemeral: true });
 
-        const [, guildFromId, rewardId] = btnInt.customId.split("::");
-        const reward = await Reward.findOne({ guildId: guildFromId, rewardId }).lean();
+        // parse index from customId (third part) and validate
+        const parts = btnInt.customId.split("::");
+        if (parts.length < 3) {
+          return btnInt.editReply({ content: "❌ Invalid button data." });
+        }
+        const idx = parseInt(parts[2], 10);
+        if (Number.isNaN(idx) || idx < 0 || idx >= rewards.length) {
+          return btnInt.editReply({ content: "❌ Invalid selection (this reward may have been removed). Please try again." });
+        }
+
+        const reward = rewards[idx];
         if (!reward) return btnInt.editReply({ content: "❌ Chosen reward no longer exists." });
 
         await btnInt.editReply({ content: "✅ Reward selected. I will DM you with next steps." });
@@ -144,7 +157,13 @@ export default {
           }
 
           // If reward id contains 'gems' -> call PythonAnywhere grant
-          const isGems = /gems/i.test(String(reward.rewardId));
+          const rid = String(reward.rewardId ?? '').toLowerCase();
+          const isGems =
+            rid.includes('gems') ||
+            rid.includes('freehardcurrency') ||
+            rid.includes('paidhardcurrency') ||
+            rid.includes('hardcurrency');
+
           if (isGems) {
             const endpoint = process.env.PYAN_ENDPOINT;
             if (!endpoint) {
