@@ -12,6 +12,7 @@ export default {
 \`unban <playfab_id>\` - Unban a player
 \`modlist\` - Show app moderators list
 \`reward\` - Coin app rewards
+\`addcreature\` - Add creature for player
     `;
     return replySafe(interactionOrMessage, helpText, { ephemeral: isInteraction(interactionOrMessage) });
   }
