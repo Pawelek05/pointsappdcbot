@@ -1,5 +1,5 @@
 // index.js (pełen plik - podmień oryginał)
-import { Client, GatewayIntentBits, Collection, REST, Routes } from 'discord.js';
+import { Client, GatewayIntentBits, Partials, Collection, REST, Routes } from 'discord.js';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
@@ -20,9 +20,16 @@ if (!TOKEN || !CLIENT_ID || !MONGO_URI || !process.env.PLAYFAB_SECRET) {
   process.exit(1);
 }
 
-// --- DISCORD CLIENT ---
 const client = new Client({ 
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] 
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.DirectMessages,   // ✅ REQUIRED FOR DM
+    GatewayIntentBits.MessageContent    // ✅ REQUIRED TO READ TEXT
+  ],
+  partials: [
+    Partials.Channel                    // ✅ REQUIRED FOR DM CHANNELS
+  ]
 });
 client.commands = new Collection();
 

@@ -57,7 +57,7 @@ export default {
       const embed = new EmbedBuilder()
         .setTitle("Available rewards")
         .setColor(embedColor)
-        .setDescription(`Click a button to choose a reward. Price shown in ${coinEmoji} (Money).`);
+        .setDescription(`Click a button to choose a reward.`);
 
       // nicer listing: add each reward as a field
       for (const r of rewards) {
