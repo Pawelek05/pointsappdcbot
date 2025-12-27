@@ -11,6 +11,7 @@ export default {
 \`setpoints <playfab_id> <number>\` - Set Money value
 \`unban <playfab_id>\` - Unban a player
 \`modlist\` - Show app moderators list
+\`reward\` - Coin app rewards
     `;
     return replySafe(interactionOrMessage, helpText, { ephemeral: isInteraction(interactionOrMessage) });
   }

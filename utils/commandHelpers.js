@@ -59,11 +59,26 @@ export function getStringOption(interactionOrMessage, name, args = [], argIndex 
 }
 
 export function getIntegerOption(interactionOrMessage, name, args = [], argIndex = 1) {
+  // Try slash-integer first
   if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getInteger === 'function') {
     try {
-      return interactionOrMessage.options.getInteger(name);
+      const v = interactionOrMessage.options.getInteger(name);
+      if (v !== null && v !== undefined) return v;
     } catch (e) {}
   }
+
+  // If not found, try slash-number (float) and coerce to integer
+  if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getNumber === 'function') {
+    try {
+      const nv = interactionOrMessage.options.getNumber(name);
+      if (nv !== null && nv !== undefined) {
+        const iv = parseInt(nv, 10);
+        return Number.isFinite(iv) ? iv : null;
+      }
+    } catch (e) {}
+  }
+
+  // Fallback: check args array (positional)
   if (args && args[argIndex] !== undefined) {
     const v = parseInt(args[argIndex], 10);
     return Number.isFinite(v) ? v : null;
