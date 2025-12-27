@@ -22,27 +22,27 @@ const COOLDOWN_MS = 8000; // increase if you want less frequent OCR per channel
 const PLAYFAB_ID_REGEX = /\b[A-F0-9]{16}\b/;
 
 // aggressive char map for common OCR mistakes
+// Aggressive OCR ambiguity fixes
 const CHAR_MAP = {
   'O':'0','o':'0','Q':'0','D':'0',
   'I':'1','l':'1','i':'1','!':'1','|':'1',
   'S':'5','s':'5',
   'Z':'2','z':'2',
+
+  // NEW
   'B':'8','b':'8',
-  'G':'6','g':'9',
-  'q':'9','P':'9',
-  'T':'7','t':'7'
+  'A':'4','a':'4'
 };
 
-// ambiguity pools used to generate variants
 const AMBIG = {
   'O':['0','O'],'0':['0','O'],'Q':['0','Q'],'D':['0','D'],
   'I':['1','I','l'],'1':['1','I','l'],'l':['1','l'],
   'S':['5','S'],'5':['5','S'],
   'Z':['2','Z'],'2':['2','Z'],
-  'B':['8','B'],'8':['8','B'],
-  'G':['6','G'],'6':['6','G'],
-  'q':['9','Q','9'],'P':['9','P'],
-  'T':['7','T'],'7':['7','T']
+
+  // NEW
+  'B':['B','8'],'8':['8','B'],
+  'A':['A','4'],'4':['4','A']
 };
 
 function generateVariants(s) {
@@ -416,8 +416,16 @@ export default async function ocrMessageHandler(message) {
       const norm = aggressiveNormalize(raw).replace(/[^A-Za-z0-9]/g,'').toUpperCase();
       for (let i = 0; i <= Math.max(0, norm.length - 16); i++) {
         const s = norm.slice(i, i+16);
-        const purity = hexPurity(s);
-        const score = purity * 100 + (substrVotes.get(s) || 0);
+		const purity = hexPurity(s);
+		const votes = substrVotes.get(s) || 0;
+
+		// penalize ambiguous shapes if OCR already saw letter form
+		let penalty = 0;
+		if (s.includes('8') && raw.includes('B')) penalty -= 1.2;
+		if (s.includes('4') && raw.includes('A')) penalty -= 1.2;
+
+		const score = purity * 100 + votes + penalty;
+
         if (score > bestScore) { bestScore = score; best = s; }
       }
     }
