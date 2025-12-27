@@ -7,22 +7,29 @@ export function isInteraction(obj) {
     (typeof obj.options.get === 'function' ||
       typeof obj.options.getUser === 'function' ||
       typeof obj.options.getString === 'function' ||
-      typeof obj.options.getInteger === 'function')
+      typeof obj.options.getInteger === 'function' ||
+      typeof obj.options.getNumber === 'function')
   );
 }
 
 export async function replySafe(interactionOrMessage, content, opts = {}) {
-  // opts: { embeds, ephemeral }
+  // opts: { embeds, ephemeral, components }
   if (isInteraction(interactionOrMessage)) {
     const payload = {};
     if (typeof content === 'string' && content.length) payload.content = content;
     if (opts.embeds) payload.embeds = opts.embeds;
+    if (opts.components) payload.components = opts.components;
     if (opts.ephemeral) payload.ephemeral = true;
     if (Object.keys(payload).length === 0) payload.content = '\u200B';
     return interactionOrMessage.reply(payload);
   } else {
-    if (opts.embeds) return interactionOrMessage.reply({ embeds: opts.embeds });
-    return interactionOrMessage.reply(content);
+    // message-based
+    const sendPayload = {};
+    if (typeof content === 'string' && content.length) sendPayload.content = content;
+    if (opts.embeds) sendPayload.embeds = opts.embeds;
+    if (opts.components) sendPayload.components = opts.components;
+    if (Object.keys(sendPayload).length === 0) sendPayload.content = '\u200B';
+    return interactionOrMessage.reply(sendPayload);
   }
 }
 

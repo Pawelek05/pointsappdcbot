@@ -5,8 +5,8 @@ const RewardSchema = new mongoose.Schema({
   guildId: { type: String, required: true, index: true },
   rewardId: { type: String, required: true }, // e.g. "Gems", "SkinX", "Coins"
   name: { type: String, required: true },     // display name
-  description: { type: String, default: "" },
-  price: { type: Number, required: true },    // cost in PlayFab Money
+  price: { type: Number, required: true },    // cost in PlayFab Money (coins)
+  amount: { type: Number, required: true },   // how many Gems/units are granted
   emoji: { type: String, default: null },
   createdAt: { type: Date, default: () => new Date() }
 });
