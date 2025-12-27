@@ -1,5 +1,5 @@
 // utils/commandHelpers.js
-import { reply } from 'node:console'; // keep eslint happy if needed, not used
+
 export function isInteraction(obj) {
   return !!(
     obj &&
@@ -8,84 +8,130 @@ export function isInteraction(obj) {
     (typeof obj.options.get === 'function' ||
       typeof obj.options.getUser === 'function' ||
       typeof obj.options.getString === 'function' ||
-      typeof obj.options.getInteger === 'function')
+      typeof obj.options.getInteger === 'function' ||
+      typeof obj.options.getNumber === 'function')
   );
 }
 
 /**
- * replySafe:
- * - for interactions: if not yet replied -> reply()
- *                        if deferred -> editReply()
- *                        if already replied -> followUp()
- * - for messages: fallback to message.reply()
- * - catches Unknown Interaction (10062) and sends to channel or DM instead
+ * replySafe(interactionOrMessage, content, opts = {})
+ * - interactionOrMessage: Interaction or Message
+ * - content: string (optional if embeds provided)
+ * - opts: { embeds, components, ephemeral }
  *
- * opts: { embeds, ephemeral }
+ * Behavior:
+ * - For Interactions:
+ *    * if deferred => editReply(payload)
+ *    * else if replied => followUp(payload)
+ *    * else => reply(payload)
+ * - If the interaction is unknown/expired (Discord code 10062) => fallback to sending to channel or DM
+ * - For message objects => message.reply(...) with fallback to channel.send(...)
  */
 export async function replySafe(interactionOrMessage, content, opts = {}) {
-  // build payload
+  // build payloads
   const payload = {};
-  if (opts.embeds) payload.embeds = opts.embeds;
   if (typeof content === 'string' && content.length) payload.content = content;
-  if (opts.ephemeral) payload.ephemeral = true;
+  if (opts.embeds) payload.embeds = opts.embeds;
+  if (opts.components) payload.components = opts.components;
+
+  // ephemeral only meaningful for initial interaction reply
+  const ephemeral = !!opts.ephemeral;
+
+  // ensure we never send an empty payload to Discord
+  if (Object.keys(payload).length === 0) payload.content = '\u200B';
 
   // Interaction path
   if (isInteraction(interactionOrMessage)) {
     try {
-      // if nothing to send, keep a blank content (discord forbids empty payload)
-      if (Object.keys(payload).length === 0) payload.content = '\u200B';
+      // If message should be ephemeral and we are replying, attach flag only when calling reply()
+      const replyPayload = { ...payload };
+      if (ephemeral) replyPayload.ephemeral = true;
 
-      // if deferred -> editReply
+      // If already deferred => editReply
       if (interactionOrMessage.deferred) {
-        return await interactionOrMessage.editReply(payload);
+        return await interactionOrMessage.editReply(replyPayload);
       }
 
-      // if already replied -> followUp
+      // If already replied => followUp (followUps cannot be ephemeral in many cases)
       if (interactionOrMessage.replied) {
-        return await interactionOrMessage.followUp(payload);
+        // followUp doesn't support ephemeral reliably; remove ephemeral flag if present
+        if (replyPayload.ephemeral) delete replyPayload.ephemeral;
+        return await interactionOrMessage.followUp(replyPayload);
       }
 
       // else -> reply
-      return await interactionOrMessage.reply(payload);
+      return await interactionOrMessage.reply(replyPayload);
     } catch (err) {
-      // handle Unknown interaction (10062) and other problems gracefully
+      // handle Unknown interaction (10062) and fallback to channel/DM
       try {
-        const code = err?.code ?? err?.rawError?.code;
+        const code = err?.code ?? err?.rawError?.code ?? null;
         if (code === 10062) {
-          // interaction unknown/expired — fallback: send to channel if available, otherwise attempt DM
+          // Interaction expired or unknown — fallback to channel or DM send
           try {
-            const chan = interactionOrMessage.channel ?? (await interactionOrMessage.user.createDM());
-            if (payload.embeds) {
-              return chan.send({ embeds: payload.embeds });
+            // prefer channel if available
+            const channel = interactionOrMessage.channel ?? null;
+            if (channel && typeof channel.send === 'function') {
+              // send embeds/components or text to channel
+              if (payload.embeds || payload.components) {
+                return channel.send({
+                  content: payload.content ?? '\u200B',
+                  embeds: payload.embeds,
+                  components: payload.components
+                });
+              }
+              return channel.send(payload.content ?? '\u200B');
             }
-            return chan.send(payload.content ?? '\u200B');
-          } catch (sendErr) {
-            console.error('replySafe: fallback channel/DM send failed', sendErr);
-            throw err; // rethrow original for visibility
+
+            // fallback to DM to the user
+            const user = interactionOrMessage.user ?? interactionOrMessage.user;
+            if (user && typeof user.createDM === 'function') {
+              const dm = await user.createDM();
+              if (payload.embeds || payload.components) {
+                return dm.send({
+                  content: payload.content ?? '\u200B',
+                  embeds: payload.embeds,
+                  components: payload.components
+                });
+              }
+              return dm.send(payload.content ?? '\u200B');
+            }
+          } catch (fallbackErr) {
+            console.error('replySafe: fallback send failed', fallbackErr);
+            // rethrow original err for visibility
+            throw err;
           }
         }
       } catch (e) {
         // ignore
       }
-      // rethrow unexpected errors so caller can log them
+      // rethrow unexpected errors
       throw err;
     }
   }
 
-  // Message path (normal message object)
+  // Message object path
   try {
-    if (opts.embeds) return interactionOrMessage.reply({ embeds: opts.embeds });
-    return interactionOrMessage.reply(content);
+    const sendPayload = {};
+    if (payload.content) sendPayload.content = payload.content;
+    if (payload.embeds) sendPayload.embeds = payload.embeds;
+    if (payload.components) sendPayload.components = payload.components;
+
+    if (Object.keys(sendPayload).length === 0) sendPayload.content = '\u200B';
+    return await interactionOrMessage.reply(sendPayload);
   } catch (err) {
-    // if even that fails, try channel send
+    // fallback to channel.send if message.reply fails
     try {
       const ch = interactionOrMessage.channel;
-      if (ch && ch.send) {
-        if (opts.embeds) return ch.send({ embeds: opts.embeds });
-        return ch.send(content ?? '\u200B');
+      if (ch && typeof ch.send === 'function') {
+        const sendPayload = {};
+        if (payload.content) sendPayload.content = payload.content;
+        if (payload.embeds) sendPayload.embeds = payload.embeds;
+        if (payload.components) sendPayload.components = payload.components;
+        if (Object.keys(sendPayload).length === 0) sendPayload.content = '\u200B';
+        return await ch.send(sendPayload);
       }
     } catch (e) {
-      console.error('replySafe: message fallback failed', e);
+      console.error('replySafe: fallback channel send failed', e);
     }
     throw err;
   }
@@ -124,11 +170,26 @@ export function getStringOption(interactionOrMessage, name, args = [], argIndex 
 }
 
 export function getIntegerOption(interactionOrMessage, name, args = [], argIndex = 1) {
+  // Try slash-integer first
   if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getInteger === 'function') {
     try {
-      return interactionOrMessage.options.getInteger(name);
+      const v = interactionOrMessage.options.getInteger(name);
+      if (v !== null && v !== undefined) return v;
     } catch (e) {}
   }
+
+  // If not found, try slash-number (float) and coerce to integer
+  if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getNumber === 'function') {
+    try {
+      const nv = interactionOrMessage.options.getNumber(name);
+      if (nv !== null && nv !== undefined) {
+        const iv = parseInt(nv, 10);
+        return Number.isFinite(iv) ? iv : null;
+      }
+    } catch (e) {}
+  }
+
+  // Fallback: check args array (positional)
   if (args && args[argIndex] !== undefined) {
     const v = parseInt(args[argIndex], 10);
     return Number.isFinite(v) ? v : null;
