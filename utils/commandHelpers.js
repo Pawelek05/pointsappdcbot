@@ -1,4 +1,5 @@
 // utils/commandHelpers.js
+import { reply } from 'node:console'; // keep eslint happy if needed, not used
 export function isInteraction(obj) {
   return !!(
     obj &&
@@ -7,29 +8,86 @@ export function isInteraction(obj) {
     (typeof obj.options.get === 'function' ||
       typeof obj.options.getUser === 'function' ||
       typeof obj.options.getString === 'function' ||
-      typeof obj.options.getInteger === 'function' ||
-      typeof obj.options.getNumber === 'function')
+      typeof obj.options.getInteger === 'function')
   );
 }
 
+/**
+ * replySafe:
+ * - for interactions: if not yet replied -> reply()
+ *                        if deferred -> editReply()
+ *                        if already replied -> followUp()
+ * - for messages: fallback to message.reply()
+ * - catches Unknown Interaction (10062) and sends to channel or DM instead
+ *
+ * opts: { embeds, ephemeral }
+ */
 export async function replySafe(interactionOrMessage, content, opts = {}) {
-  // opts: { embeds, ephemeral, components }
+  // build payload
+  const payload = {};
+  if (opts.embeds) payload.embeds = opts.embeds;
+  if (typeof content === 'string' && content.length) payload.content = content;
+  if (opts.ephemeral) payload.ephemeral = true;
+
+  // Interaction path
   if (isInteraction(interactionOrMessage)) {
-    const payload = {};
-    if (typeof content === 'string' && content.length) payload.content = content;
-    if (opts.embeds) payload.embeds = opts.embeds;
-    if (opts.components) payload.components = opts.components;
-    if (opts.ephemeral) payload.ephemeral = true;
-    if (Object.keys(payload).length === 0) payload.content = '\u200B';
-    return interactionOrMessage.reply(payload);
-  } else {
-    // message-based
-    const sendPayload = {};
-    if (typeof content === 'string' && content.length) sendPayload.content = content;
-    if (opts.embeds) sendPayload.embeds = opts.embeds;
-    if (opts.components) sendPayload.components = opts.components;
-    if (Object.keys(sendPayload).length === 0) sendPayload.content = '\u200B';
-    return interactionOrMessage.reply(sendPayload);
+    try {
+      // if nothing to send, keep a blank content (discord forbids empty payload)
+      if (Object.keys(payload).length === 0) payload.content = '\u200B';
+
+      // if deferred -> editReply
+      if (interactionOrMessage.deferred) {
+        return await interactionOrMessage.editReply(payload);
+      }
+
+      // if already replied -> followUp
+      if (interactionOrMessage.replied) {
+        return await interactionOrMessage.followUp(payload);
+      }
+
+      // else -> reply
+      return await interactionOrMessage.reply(payload);
+    } catch (err) {
+      // handle Unknown interaction (10062) and other problems gracefully
+      try {
+        const code = err?.code ?? err?.rawError?.code;
+        if (code === 10062) {
+          // interaction unknown/expired — fallback: send to channel if available, otherwise attempt DM
+          try {
+            const chan = interactionOrMessage.channel ?? (await interactionOrMessage.user.createDM());
+            if (payload.embeds) {
+              return chan.send({ embeds: payload.embeds });
+            }
+            return chan.send(payload.content ?? '\u200B');
+          } catch (sendErr) {
+            console.error('replySafe: fallback channel/DM send failed', sendErr);
+            throw err; // rethrow original for visibility
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+      // rethrow unexpected errors so caller can log them
+      throw err;
+    }
+  }
+
+  // Message path (normal message object)
+  try {
+    if (opts.embeds) return interactionOrMessage.reply({ embeds: opts.embeds });
+    return interactionOrMessage.reply(content);
+  } catch (err) {
+    // if even that fails, try channel send
+    try {
+      const ch = interactionOrMessage.channel;
+      if (ch && ch.send) {
+        if (opts.embeds) return ch.send({ embeds: opts.embeds });
+        return ch.send(content ?? '\u200B');
+      }
+    } catch (e) {
+      console.error('replySafe: message fallback failed', e);
+    }
+    throw err;
   }
 }
 
@@ -66,26 +124,11 @@ export function getStringOption(interactionOrMessage, name, args = [], argIndex 
 }
 
 export function getIntegerOption(interactionOrMessage, name, args = [], argIndex = 1) {
-  // Try slash-integer first
   if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getInteger === 'function') {
     try {
-      const v = interactionOrMessage.options.getInteger(name);
-      if (v !== null && v !== undefined) return v;
+      return interactionOrMessage.options.getInteger(name);
     } catch (e) {}
   }
-
-  // If not found, try slash-number (float) and coerce to integer
-  if (isInteraction(interactionOrMessage) && typeof interactionOrMessage.options.getNumber === 'function') {
-    try {
-      const nv = interactionOrMessage.options.getNumber(name);
-      if (nv !== null && nv !== undefined) {
-        const iv = parseInt(nv, 10);
-        return Number.isFinite(iv) ? iv : null;
-      }
-    } catch (e) {}
-  }
-
-  // Fallback: check args array (positional)
   if (args && args[argIndex] !== undefined) {
     const v = parseInt(args[argIndex], 10);
     return Number.isFinite(v) ? v : null;
