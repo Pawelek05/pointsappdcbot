@@ -2,7 +2,7 @@
 import PlayFab from 'playfab-sdk';
 import axios from 'axios';
 import { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
-import { replySafe, isInteraction, getStringOption, getNumberOption } from '../utils/commandHelpers.js';
+import { replySafe, isInteraction, getStringOption, getIntegerOption } from '../utils/commandHelpers.js';
 import isMod from '../utils/isMod.js';
 import Reward from '../models/Reward.js';
 
@@ -64,14 +64,13 @@ export default {
       }
 
       const sent = await replySafe(interactionOrMessage, null, { embeds: [embed], components: rows });
+      // replySafe for interactions may return a Promise for the interaction reply; assume it returns a Message-like object in your environment
       const message = sent;
 
       const collector = message.createMessageComponentCollector ? message.createMessageComponentCollector({ time: 5 * 60 * 1000 }) : null;
       if (!collector) return; // fallback: not supported in this environment
 
       collector.on('collect', async (btnInt) => {
-        if (btnInt.user.id !== btnInt.user.id) { /* safety but not needed */ }
-
         await btnInt.deferReply({ ephemeral: true });
         const [, guildFromId, rewardId] = btnInt.customId.split("::");
         const reward = await Reward.findOne({ guildId: guildFromId, rewardId }).lean();
@@ -114,20 +113,33 @@ export default {
 
           // If rewardId === "Gems" => call external endpoint on PythonAnywhere
           if (reward.rewardId === "Gems") {
-            const endpoint = process.env.PYAN_ENDPOINT || "https://youruser.pythonanywhere.com/grant_reward";
-            const adminUser = process.env.PYAN_ADMIN_USER || "Bot";
-            const adminPass = process.env.PYAN_ADMIN_PASS || "VTHcZoYpqwOk0AOwLa8xdKEhyH6tBLwH";
-            // better: use API key: process.env.PYAN_API_KEY
+            const endpoint = process.env.PYAN_ENDPOINT;
+            if (!endpoint) return dm.channel.send("❌ Server endpoint not configured (PYAN_ENDPOINT). Contact an admin.");
+
+            const apiKey = process.env.PYAN_API_KEY; // preferred
+            const adminUser = process.env.DB_LOGIN;  // Railway admin login
+            const adminPass = process.env.DB_PASSWORD;
+
+            let axiosOpts = { timeout: 10_000 };
+            if (apiKey) axiosOpts.headers = { 'X-API-KEY': apiKey };
 
             let grantResp;
             try {
-              grantResp = await axios.post(endpoint, {
-                admin_user: adminUser,
-                admin_pass: adminPass,
+              const body = {
                 cardwars_id: cardwarsId,
                 reward_type: "Gems",
-                amount: reward.price // amount of gems to add — adjust mapping if needed
-              }, { timeout: 10_000 });
+                amount: reward.price // amount mapping - adjust if you want different ratio
+              };
+              if (!apiKey) {
+                // admin creds fallback (will be used only if PYAN_API_KEY not set)
+                if (!adminUser || !adminPass) {
+                  return dm.channel.send("❌ Server auth not configured. Contact an admin.");
+                }
+                body.admin_user = adminUser;
+                body.admin_pass = adminPass;
+              }
+
+              grantResp = await axios.post(endpoint, body, axiosOpts);
             } catch (err) {
               const msg = err.response?.data?.error ?? err.message;
               return dm.channel.send(`❌ Error calling grant endpoint: ${msg}`);
@@ -181,7 +193,8 @@ export default {
       const rewardId = getStringOption(interactionOrMessage, "id", args, 0);
       const name = getStringOption(interactionOrMessage, "name", args, 1);
       const description = getStringOption(interactionOrMessage, "description", args, 2);
-      const price = Number(getNumberOption(interactionOrMessage, "price", args, 3));
+      const priceVal = getIntegerOption(interactionOrMessage, "price", args, 3);
+      const price = priceVal !== null ? Number(priceVal) : NaN;
       const emoji = getStringOption(interactionOrMessage, "emoji", args, 4) || null;
 
       if (!rewardId || !name || Number.isNaN(price)) return replySafe(interactionOrMessage, "❌ Invalid arguments.", { ephemeral: true });
