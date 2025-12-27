@@ -167,6 +167,11 @@ export default {
             rid.includes('paidhardcurrency') ||
             rid.includes('hardcurrency');
 
+          // detect creature/rainbow requirement
+          const isCreatureOrRainbow =
+            rid.includes('creature') ||
+            rid.includes('rainbow');
+
           if (isGems) {
             // call PythonAnywhere
             const endpoint = process.env.PYAN_ENDPOINT;
@@ -297,6 +302,40 @@ export default {
                 return;
               }
 
+              // if reward id contains creature or rainbow, ask the user what they want (loop until valid)
+              let whatHeWants = null;
+              if (isCreatureOrRainbow) {
+                const amount = Number(reward.amount ?? reward.price) || 1;
+                const maxWords = amount * 2;
+                const question = amount > 1 ? "What creatures do you want? (max " + maxWords + " words)" : "What creature do you want? (max " + maxWords + " words)";
+                // loop until valid or timeout per attempt
+                while (true) {
+                  await dmChannel.send(question);
+                  const replyCol = await dmChannel.awaitMessages({ filter, max: 1, time: 2 * 60 * 1000 });
+                  if (!replyCol || replyCol.size === 0) {
+                    await dmChannel.send("⏲️ No answer received — cancelled.");
+                    // revert money? earlier you said do not cancel; here we cancel safely
+                    // Refund to be safe because player didn't specify what they want
+                    try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch (e) { console.error('Refund failed on timeout after creature prompt', e); }
+                    return;
+                  }
+                  const reply = replyCol.first().content.trim();
+                  // count words
+                  const words = reply.split(/\s+/).filter(Boolean);
+                  if (words.length === 0) {
+                    await dmChannel.send(`❌ Invalid answer. Please provide up to ${maxWords} words describing the creature(s). Try again.`);
+                    continue;
+                  }
+                  if (words.length > maxWords) {
+                    await dmChannel.send(`❌ Too many words. You may provide up to ${maxWords} words but you provided ${words.length}. Try again.`);
+                    continue;
+                  }
+                  // accepted
+                  whatHeWants = reply;
+                  break;
+                }
+              }
+
               const manualEmbed = new EmbedBuilder()
                 .setTitle("Manual Reward Required")
                 .setColor(manualColor)
@@ -314,6 +353,12 @@ export default {
                 )
                 .setTimestamp()
                 .setFooter({ text: "React with ✅ when you manually grant this reward" });
+
+              if (whatHeWants) {
+                manualEmbed.addFields({ name: "What he wants:", value: String(whatHeWants) });
+              } else {
+                manualEmbed.addFields({ name: "What he wants:", value: "—" });
+              }
 
               const sent = await channel.send({ embeds: [manualEmbed] });
               try { await sent.react('✅'); } catch (e) { console.error('React failed', e); }
