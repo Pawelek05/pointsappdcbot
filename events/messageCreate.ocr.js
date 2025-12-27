@@ -1,5 +1,5 @@
 // events/messageCreate.ocr.js
-// Robust OCR handler with improved post-processing to fix common OCR misreads (e.g. letters <-> numbers).
+// OCR handler with debug output, relaxed green detection and improved post-processing.
 // Sends only the ID (16 hex chars) when recognized. Messages in English.
 
 import GuildConfig from '../models/GuildConfig.js';
@@ -7,8 +7,12 @@ import * as Tesseract from 'tesseract.js';
 import sharp from 'sharp';
 import PlayFab from 'playfab-sdk';
 
-// Enable PlayFab validation if you have PlayFab.settings.developerSecretKey set
+// Toggle PlayFab validation (set to true if PlayFab.settings.developerSecretKey is configured)
 const PLAYFAB_VALIDATE = true;
+
+// Optional debug channel (set env OCR_DEBUG_CHANNEL_ID to a channel id to receive debug images)
+// If not set, the bot will try to DM the message author; if DM fails, it will fallback to the original channel.
+const DEBUG_CHANNEL_ID = process.env.OCR_DEBUG_CHANNEL_ID || null;
 
 // cooldown per channel
 const channelCooldowns = new Map();
@@ -26,8 +30,7 @@ const CHAR_MAP = {
   'B':'8','b':'8',
   'G':'6','g':'9',
   'q':'9','P':'9',
-  'T':'7','t':'7',
-  'y':'Y' // keep, will be removed later if not hex
+  'T':'7','t':'7'
 };
 
 // ambiguity pools used to generate variants
@@ -62,8 +65,9 @@ function generateVariants(s) {
   return results;
 }
 
-// ---------- Recognition (compatibility-friendly) ----------
+// ---------- Recognition helper (compat-friendly) ----------
 async function tesseractRecognizeBuffer(buffer) {
+  // Try different shapes of Tesseract API (works with many versions)
   try {
     if (typeof Tesseract.recognize === 'function') {
       try {
@@ -95,12 +99,11 @@ async function tesseractRecognizeBuffer(buffer) {
     console.warn('Tesseract direct recognize detection error:', e);
   }
 
-  // If not found, return empty string - upstream will handle
   console.error('Tesseract: no recognize method available in this environment.');
   return '';
 }
 
-// ---------- Preprocessing (aggressive but slow) ----------
+// ---------- Preprocessing ----------
 function makeDilateKernel(size = 3) {
   const k = size * size;
   return { width: size, height: size, kernel: new Array(k).fill(1) };
@@ -119,7 +122,7 @@ async function buildAggressiveVariants(maskPngBuffer) {
         .toFormat('png')
         .toBuffer();
       variants.push(buf);
-    } catch (e) {}
+    } catch (_) {}
   }
 
   try {
@@ -128,30 +131,31 @@ async function buildAggressiveVariants(maskPngBuffer) {
     const up = await sharp(maskPngBuffer).resize({ width: wup, kernel: 'nearest' }).toBuffer();
     const dil = await sharp(up).convolve(makeDilateKernel(3)).threshold(140).toFormat('png').toBuffer();
     variants.push(dil);
-  } catch (e) {}
+  } catch (_) {}
 
   try {
     const v = await sharp(maskPngBuffer).grayscale().sharpen().normalize().threshold(150).toFormat('png').toBuffer();
     variants.push(v);
-  } catch (e) {}
+  } catch (_) {}
 
   try {
     const v = await sharp(maskPngBuffer).grayscale().median(1).sharpen().threshold(150).toFormat('png').toBuffer();
     variants.push(v);
-  } catch (e) {}
+  } catch (_) {}
 
   try {
     const meta = await sharp(maskPngBuffer).metadata();
     const upw = Math.max(Math.round((meta.width || 100) * 1.8), 150);
-    const v = await sharp(maskPngBuffer).resize({ width: upw, kernel: 'nearest' }).grayscale().blur(0.3).normalize().threshold(140).toFormat('png').toBuffer();
+    const v = await sharp(maskPngBuffer).resize({ width: upw, kernel: 'nearest' })
+      .grayscale().blur(0.3).normalize().threshold(140).toFormat('png').toBuffer();
     variants.push(v);
-  } catch (e) {}
+  } catch (_) {}
 
   variants.push(maskPngBuffer);
   return variants;
 }
 
-// PlayFab validation
+// PlayFab validation helper
 async function tryValidatePlayFab(id) {
   if (!PLAYFAB_VALIDATE) return false;
   try {
@@ -160,81 +164,110 @@ async function tryValidatePlayFab(id) {
       PlayFab.PlayFabServer.GetUserAccountInfo(payload, (err, result) => resolve({ err, result }));
     });
     if (!res.err && res.result?.data?.UserInfo?.PlayFabId === id) return true;
-  } catch (e) {}
+  } catch (e) {
+    console.warn('PlayFab validation error:', e);
+  }
   return false;
 }
 
-// ---------- New robust candidate extraction ----------
-
-// Normalize raw OCR string aggressively (apply CHAR_MAP and uppercase)
+// ---------- Candidate extraction helpers ----------
 function aggressiveNormalize(raw) {
   return raw.split('').map(ch => CHAR_MAP[ch] || ch).join('').toUpperCase();
 }
-
-// Return array of all possible substrings length 16 from normalized text (sliding window)
 function substringsOfLength16(norm) {
   const res = [];
-  // keep only alphanum to slide (we keep letters too, we'll filter hex later)
   const alnum = norm.replace(/[^A-Za-z0-9]/g, '');
   if (alnum.length < 16) return res;
-  for (let i = 0; i <= alnum.length - 16; i++) {
-    res.push(alnum.slice(i, i + 16));
-  }
+  for (let i = 0; i <= alnum.length - 16; i++) res.push(alnum.slice(i, i + 16));
   return res;
 }
-
-// hex purity: fraction of characters that are 0-9 A-F
 function hexPurity(s) {
-  if (!s || s.length === 0) return 0;
+  if (!s) return 0;
   let ok = 0;
-  for (const ch of s) {
-    if (/[0-9A-F]/.test(ch)) ok++;
-  }
+  for (const ch of s) if (/[0-9A-F]/.test(ch)) ok++;
   return ok / s.length;
 }
-
-// Build candidate map from all OCR results: substring -> count
 function buildSubstringVotes(ocrResults) {
   const map = new Map();
   for (const raw of ocrResults) {
     const norm = aggressiveNormalize(raw);
-    // first, try to extract direct hex-like substrings (A-F0-9)
     const hexMatches = norm.match(/[A-F0-9]{12,}/g);
     if (hexMatches) {
       for (const m of hexMatches) {
-        if (m.length === 16) {
-          map.set(m, (map.get(m) || 0) + 3); // direct hex match gets more weight
-        } else if (m.length > 16) {
-          // slide windows across it
+        if (m.length === 16) map.set(m, (map.get(m) || 0) + 3);
+        else if (m.length > 16) {
           for (let i = 0; i <= m.length - 16; i++) {
             const s = m.slice(i, i+16);
             map.set(s, (map.get(s) || 0) + 2);
           }
-        } else {
-          // length 12-15, include as lower weight substrings when padded later
-          map.set(m, (map.get(m) || 0) + 1);
-        }
+        } else map.set(m, (map.get(m) || 0) + 1);
       }
     }
-    // Also add all sliding windows from full normalized (aggressive) string
     const substrs = substringsOfLength16(norm);
-    for (const s of substrs) {
-      map.set(s, (map.get(s) || 0) + 1);
-    }
+    for (const s of substrs) map.set(s, (map.get(s) || 0) + 1);
   }
   return map;
 }
-
-// Choose best candidate ordering by votes and hexPurity
 function rankCandidatesByScore(map) {
   const arr = Array.from(map.entries()).map(([s,c]) => ({ s, c, purity: hexPurity(s) }));
-  // score: prioritize count then purity
   arr.sort((a,b) => {
     const sa = a.c * 100 + Math.round(a.purity * 100);
     const sb = b.c * 100 + Math.round(b.purity * 100);
     return sb - sa;
   });
   return arr.map(x => x.s);
+}
+
+// ---------- Debug helper ----------
+async function sendDebug(message, info) {
+  // info: { maskPng, bestVariant, ocrResults, ranked, substrVotes }
+  const contentLines = [];
+  contentLines.push('**OCR debug info**');
+  if (info.ranked && info.ranked.length) {
+    contentLines.push('Top ranked candidates:');
+    for (let i=0;i<Math.min(6, info.ranked.length); i++) {
+      const s = info.ranked[i];
+      const purity = hexPurity(s).toFixed(2);
+      const votes = info.substrVotes.get(s) || 0;
+      contentLines.push(`${i+1}. ${s} — purity ${purity}, votes ${votes}`);
+    }
+  } else {
+    contentLines.push('No ranked candidates.');
+  }
+  contentLines.push('\nRaw OCR results (by variant):');
+  for (let i=0;i<info.ocrResults.length;i++) {
+    contentLines.push(`${i+1}. ${info.ocrResults[i]}`);
+  }
+  const content = contentLines.join('\n');
+
+  // prepare files
+  const files = [];
+  if (info.maskPng) files.push({ attachment: info.maskPng, name: 'mask.png' });
+  if (info.bestVariant) files.push({ attachment: info.bestVariant, name: 'best_variant.png' });
+
+  // Try debug channel first
+  if (DEBUG_CHANNEL_ID) {
+    try {
+      const channel = await message.client.channels.fetch(DEBUG_CHANNEL_ID).catch(()=>null);
+      if (channel) {
+        await channel.send({ content, files });
+        return;
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // Try DM to author
+  try {
+    await message.author.send({ content, files });
+    return;
+  } catch (e) {
+    // fallback to sending in original channel but mark that it's debug
+    try {
+      await message.channel.send({ content: `*(debug)*\n${content}`, files });
+    } catch (e2) {
+      console.error('Failed to send debug info:', e2);
+    }
+  }
 }
 
 // ---------- Main handler ----------
@@ -259,7 +292,7 @@ export default async function ocrMessageHandler(message) {
     const filename = attachment.name || '';
     if (!attachment.contentType?.startsWith('image/') && !/\.(jpe?g|png|bmp|webp|gif)$/i.test(filename)) return;
 
-    // fetch image
+    // fetch
     const res = await fetch(attachment.url);
     if (!res.ok) return;
     const arrayBuffer = await res.arrayBuffer();
@@ -274,9 +307,9 @@ export default async function ocrMessageHandler(message) {
     const { data, info } = raw;
     const w = info.width, h = info.height, ch = info.channels;
 
-    // strict green mask
-    const delta = 24;
-    const minG = 110;
+    // relaxed green mask thresholds (lowered to detect less bright greens)
+    const delta = 18;
+    const minG = 80;
     const mask = Buffer.alloc(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -320,74 +353,65 @@ export default async function ocrMessageHandler(message) {
       .toFormat('png')
       .toBuffer();
 
-    // aggressive preprocessing (slower)
+    // aggressive preprocessing variants
     const preVariants = await buildAggressiveVariants(maskPng);
 
-    // run OCR sequentially on variants
-    const ocrResults = [];
+    // run OCR sequentially on variants — keep mapping variant->text
+    const variantResults = [];
     for (const buf of preVariants) {
       try {
         const text = await tesseractRecognizeBuffer(buf);
         const clean = (text || '').replace(/\s+/g, '');
-        if (clean) ocrResults.push(clean);
+        variantResults.push({ buf, text: clean });
       } catch (e) {
-        // ignore individual variant errors
+        variantResults.push({ buf, text: '' });
       }
     }
 
+    const ocrResults = variantResults.map(v => v.text).filter(Boolean);
     if (ocrResults.length === 0) {
-      await message.channel.send('❌ OCR failed to read text from the image.');
+      // send debug images + info
+      await sendDebug(message, { maskPng, bestVariant: preVariants[0], ocrResults: variantResults.map(v=>v.text), ranked: [], substrVotes: new Map() });
+      await message.channel.send('❌ OCR failed to read text from the image. Debug info sent.');
       return;
     }
 
-    // Build substring votes
+    // Build substring votes and ranking
     const substrVotes = buildSubstringVotes(ocrResults);
     const ranked = rankCandidatesByScore(substrVotes);
 
-    // Try ranked candidates -> validate via PlayFab or pick best purity if validation disabled
+    // Try ranked candidates (validate via PlayFab if enabled)
     for (const cand of ranked) {
-      // ensure uppercase and remove non-alnum
       const candidate = cand.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
       if (candidate.length !== 16) continue;
-      // quick sanity: ensure most chars are hex
       if ((candidate.match(/[A-F0-9]/g) || []).length < 12) continue; // require at least 12 hex chars
       if (PLAYFAB_VALIDATE) {
-        if (await tryValidatePlayFab(candidate)) {
-          await message.channel.send(candidate);
-          return;
-        }
+        if (await tryValidatePlayFab(candidate)) { await message.channel.send(candidate); return; }
       } else {
-        await message.channel.send(candidate);
-        return;
+        await message.channel.send(candidate); return;
       }
     }
 
-    // If none validated, try variants from top-ranked items
+    // Try small set of variants from top ranked
     if (ranked.length > 0) {
-      for (const base of ranked.slice(0, 6)) { // limit attempts
+      for (const base of ranked.slice(0,6)) {
         const norm = base.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
-        // generate variants
         const vars = generateVariants(norm);
         for (const v of vars) {
           const candidate = v.replace(/[^A-Za-z0-9]/g,'').toUpperCase();
           if (candidate.length !== 16) continue;
           if ((candidate.match(/[A-F0-9]/g) || []).length < 12) continue;
           if (PLAYFAB_VALIDATE) {
-            if (await tryValidatePlayFab(candidate)) {
-              await message.channel.send(candidate);
-              return;
-            }
+            if (await tryValidatePlayFab(candidate)) { await message.channel.send(candidate); return; }
           } else {
-            await message.channel.send(candidate);
-            return;
+            await message.channel.send(candidate); return;
           }
         }
       }
     }
 
-    // Final heuristic fallback: attempt to take the substring with highest hex purity among all sliding windows across all normalized OCR strings
-    let best = null;
-    let bestScore = -1;
+    // Heuristic fallback: choose best sliding-window with highest hex purity + votes
+    let best = null, bestScore = -1;
     for (const raw of ocrResults) {
       const norm = aggressiveNormalize(raw).replace(/[^A-Za-z0-9]/g,'').toUpperCase();
       for (let i = 0; i <= Math.max(0, norm.length - 16); i++) {
@@ -397,24 +421,27 @@ export default async function ocrMessageHandler(message) {
         if (score > bestScore) { bestScore = score; best = s; }
       }
     }
-    if (best && best.length === 16 && (best.match(/[A-F0-9]/g) || []).length >= 10) {
-      // if PlayFab enabled try validate, else send
+
+    if (best && best.length === 16) {
+      const purity = hexPurity(best);
+      // if PlayFab validation enabled, try validating
       if (PLAYFAB_VALIDATE) {
-        if (await tryValidatePlayFab(best)) {
-          await message.channel.send(best);
+        if (await tryValidatePlayFab(best)) { await message.channel.send(best); return; }
+        // if validation fails but purity very high, send as UNVERIFIED so you can test
+        if (purity >= 0.95) {
+          await message.channel.send(`${best} (UNVERIFIED)`); // UNVERIFIED marker
+          // also send debug info
+          await sendDebug(message, { maskPng, bestVariant: variantResults[0]?.buf || preVariants[0], ocrResults: variantResults.map(v=>v.text), ranked, substrVotes });
           return;
         }
-        // if validation fails, still don't spam wrong id; return not found
-        await message.channel.send('❌ Failed to clearly read the ID (try a higher-contrast screenshot).');
-        return;
       } else {
-        await message.channel.send(best);
-        return;
+        await message.channel.send(best); return;
       }
     }
 
-    // Nothing reliable found
-    await message.channel.send('❌ Failed to clearly read the ID (try a higher-contrast screenshot).');
+    // Nothing reliable found — send debug info
+    await sendDebug(message, { maskPng, bestVariant: variantResults[0]?.buf || preVariants[0], ocrResults: variantResults.map(v=>v.text), ranked, substrVotes });
+    await message.channel.send('❌ Failed to clearly read the ID (debug info sent).');
   } catch (err) {
     console.error('OCR handler error:', err);
   }
