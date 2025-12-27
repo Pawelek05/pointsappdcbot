@@ -134,7 +134,7 @@ export default {
         // DM flow
         try {
           const dmChannel = await btnInt.user.createDM();
-          await dmChannel.send(`You selected **${reward.name}** (Price: ${coinEmoji}${reward.price}).\nPlease reply in this DM with your **PlayFab ID**:`);
+          await dmChannel.send(`You selected **${reward.name}** (Price: ${coinEmoji}${reward.price}).\nPlease reply in this DM with your **Coin App ID**:`);
 
           const filter = m => m.author.id === btnInt.user.id && m.channelId === dmChannel.id;
           const collected = await dmChannel.awaitMessages({ filter, max: 1, time: 2 * 60 * 1000 });
@@ -146,13 +146,13 @@ export default {
           // fetch PlayFab data
           let dataResult;
           try { dataResult = await pfGetUserData(playfabId); } catch (err) {
-            return dmChannel.send(`❌ Error fetching PlayFab data: ${err.errorMessage ?? JSON.stringify(err)}`);
+            return dmChannel.send(`❌ Error fetching Coin App data: ${err.errorMessage ?? JSON.stringify(err)}`);
           }
 
           const pdata = dataResult?.data?.Data ?? {};
           const moneyStr = pdata.Money?.Value ?? "0";
           const money = Number(moneyStr);
-          if (Number.isNaN(money)) return dmChannel.send("❌ Invalid Money value in PlayFab.");
+          if (Number.isNaN(money)) return dmChannel.send("❌ Invalid Money value in Coins App.");
           if (money < reward.price) return dmChannel.send(`❌ You have ${coinEmoji}${money} Money — need ${coinEmoji}${reward.price} to claim this reward.`);
 
           // CardWars ID ask
