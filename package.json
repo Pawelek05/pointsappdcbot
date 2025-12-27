@@ -8,6 +8,7 @@
     "dotenv": "^16.3.0",
     "mongoose": "^7.3.0",
     "playfab-sdk": "^2.180.250815",
-    "sharp": "^0.34.5"
+    "sharp": "^0.34.5",
+    "tesseract.js": "^7.0.0"
   }
 }
