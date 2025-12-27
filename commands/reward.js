@@ -9,7 +9,8 @@ import GuildConfig from '../models/GuildConfig.js';
 
 const coinEmoji = '🪙';
 const embedColor = 0xF1C40F; // gold
-const alertColor = 0x2ECC71; // green for alerts
+const alertColor = 0x2ECC71; // green
+const manualColor = 0xE67E22; // orange
 
 function pfGetUserData(playfabId) {
   return new Promise((resolve, reject) => {
@@ -41,30 +42,29 @@ export default {
     },
     { name: "remove", description: "Remove reward by id (mods only)", type: 1, options: [{ name: "id", description: "Reward ID", type: 3, required: true }] },
     { name: "list", description: "List rewards (mods only)", type: 1 },
-    // NEW: set channel for alerts (mods only)
     { name: "channel", description: "Set rewards alert channel (mods only)", type: 1, options: [{ name: "channel", description: "Channel to post reward alerts", type: 7, required: true }] },
-    // NEW: toggle alerts on/off (mods only) - run /reward alerts to toggle
     { name: "alerts", description: "Toggle reward alerts (mods only)", type: 1 }
   ],
   async execute(interactionOrMessage, args = []) {
     const isInt = isInteraction(interactionOrMessage);
-    const sub = isInt ? interactionOrMessage.options.getSubcommand(false) : args[0];
+    const sub = isInt ? ( (() => { try { return interactionOrMessage.options.getSubcommand(false); } catch(e){ return null; } })() ) : args[0];
     const guildId = interactionOrMessage.guild?.id;
     const userId = interactionOrMessage.user?.id ?? interactionOrMessage.author?.id;
 
-    // PlayFab secret
+    // set PlayFab secret
     PlayFab.settings.developerSecretKey = process.env.PLAYFAB_SECRET;
 
-    // --- CLAIM ---
+    // --- CLAIM (public) ---
     if (!sub || sub === "claim") {
       const rewards = await Reward.find({ guildId }).sort({ price: 1 }).lean();
       if (!rewards.length) return replySafe(interactionOrMessage, "❌ No rewards configured on this server.", { ephemeral: true });
 
+      // build description with numbered items (only name + price)
       let desc = `Choose a reward by pressing the numbered button below. Price is shown with ${coinEmoji}.\n\n`;
-      for (let idx = 0; idx < rewards.length; idx++) {
-        const r = rewards[idx];
+      for (let i = 0; i < rewards.length; i++) {
+        const r = rewards[i];
+        const number = i + 1;
         const lineEmoji = r.emoji ? `${r.emoji} ` : '';
-        const number = idx + 1;
         desc += `**${number}.** ${lineEmoji}${r.name}\nPrice: ${coinEmoji}${r.price}\n\n`;
       }
 
@@ -73,18 +73,17 @@ export default {
         .setColor(embedColor)
         .setDescription(desc.trim());
 
-      // numbered buttons
+      // build numbered buttons (numbers only)
       const rows = [];
       for (let i = 0; i < rewards.length; i += 5) {
-        const slice = rewards.slice(i, i + 5);
         const row = new ActionRowBuilder();
+        const slice = rewards.slice(i, i + 5);
         for (let j = 0; j < slice.length; j++) {
-          const absoluteIndex = i + j;
-          const label = `${absoluteIndex + 1}`;
+          const idx = i + j;
           row.addComponents(
             new ButtonBuilder()
-              .setCustomId(`reward_claim::${guildId}::${absoluteIndex}`)
-              .setLabel(label)
+              .setCustomId(`reward_claim::${guildId}::${idx}`)
+              .setLabel(`${idx + 1}`)
               .setStyle(ButtonStyle.Primary)
           );
         }
@@ -93,7 +92,7 @@ export default {
 
       await replySafe(interactionOrMessage, null, { embeds: [embed], components: rows });
 
-      // attempt to create collector
+      // try to get reply message to collect components
       let message = null;
       if (isInt) {
         try { message = await interactionOrMessage.fetchReply(); } catch {}
@@ -105,12 +104,12 @@ export default {
       collector.on('collect', async (btnInt) => {
         await btnInt.deferReply({ ephemeral: true });
 
+        // parse index and refresh rewards (to avoid stale indexes)
         const parts = btnInt.customId.split("::");
         if (parts.length < 3) return btnInt.editReply({ content: "❌ Invalid button data." });
         const idx = parseInt(parts[2], 10);
         if (Number.isNaN(idx)) return btnInt.editReply({ content: "❌ Invalid selection." });
 
-        // refresh rewards in case DB changed between showing and click
         const rewardsRefreshed = await Reward.find({ guildId }).sort({ price: 1 }).lean();
         if (!rewardsRefreshed || idx < 0 || idx >= rewardsRefreshed.length) {
           return btnInt.editReply({ content: "❌ The selected reward is no longer available. Please try again." });
@@ -131,7 +130,7 @@ export default {
           const pfMsg = collected.first();
           const playfabId = pfMsg.content.trim();
 
-          // get PlayFab data
+          // fetch PlayFab data
           let dataResult;
           try { dataResult = await pfGetUserData(playfabId); } catch (err) {
             return dmChannel.send(`❌ Error fetching PlayFab data: ${err.errorMessage ?? JSON.stringify(err)}`);
@@ -143,14 +142,14 @@ export default {
           if (Number.isNaN(money)) return dmChannel.send("❌ Invalid Money value in PlayFab.");
           if (money < reward.price) return dmChannel.send(`❌ You have ${coinEmoji}${money} Money — need ${coinEmoji}${reward.price} to claim this reward.`);
 
-          // CardWars ID
+          // CardWars ID ask
           await dmChannel.send("Please reply in this DM with your **CardWars ID**:");
           const collected2 = await dmChannel.awaitMessages({ filter, max: 1, time: 2 * 60 * 1000 });
           if (!collected2 || collected2.size === 0) return dmChannel.send("⏲️ No CardWars ID received — cancelled.");
           const cwMsg = collected2.first();
           const cardwarsId = cwMsg.content.trim();
 
-          // Deduct PlayFab money first
+          // Deduct money first
           const oldMoney = money;
           const newMoney = oldMoney - reward.price;
           try {
@@ -160,7 +159,7 @@ export default {
             return dmChannel.send(`❌ Failed to deduct Money in PlayFab: ${err.errorMessage ?? JSON.stringify(err)}`);
           }
 
-          // Detect gems
+          // detect gems-type
           const rid = String(reward.rewardId ?? '').toLowerCase();
           const isGems =
             rid.includes('gems') ||
@@ -168,121 +167,171 @@ export default {
             rid.includes('paidhardcurrency') ||
             rid.includes('hardcurrency');
 
-          if (!isGems) {
-            // refund
-            try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
-            return dmChannel.send("⚠️ This reward type is not implemented on the game backend. Contact admins.");
-          }
+          if (isGems) {
+            // call PythonAnywhere
+            const endpoint = process.env.PYAN_ENDPOINT;
+            if (!endpoint) {
+              // refund
+              try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
+              return dmChannel.send("❌ Server endpoint not configured (PYAN_ENDPOINT). Contact an admin.");
+            }
 
-          // Call PythonAnywhere grant
-          const endpoint = process.env.PYAN_ENDPOINT;
-          if (!endpoint) {
-            try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
-            return dmChannel.send("❌ Server endpoint not configured (PYAN_ENDPOINT). Contact an admin.");
-          }
+            const apiKey = process.env.PYAN_API_KEY;
+            const adminUser = process.env.DB_LOGIN;
+            const adminPass = process.env.DB_PASSWORD;
+            let axiosOpts = { timeout: 10_000 };
+            if (apiKey) axiosOpts.headers = { 'X-API-KEY': apiKey };
 
-          const apiKey = process.env.PYAN_API_KEY;
-          const adminUser = process.env.DB_LOGIN;
-          const adminPass = process.env.DB_PASSWORD;
-          let axiosOpts = { timeout: 10_000 };
-          if (apiKey) axiosOpts.headers = { 'X-API-KEY': apiKey };
-
-          let grantResp;
-          try {
-            const body = {
-              cardwars_id: cardwarsId,
-              reward_type: "Gems",
-              amount: reward.amount ?? reward.price
-            };
-            if (!apiKey) {
-              if (!adminUser || !adminPass) {
-                try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
-                return dmChannel.send("❌ Server auth not configured. Contact an admin.");
+            let grantResp;
+            try {
+              const body = {
+                cardwars_id: cardwarsId,
+                reward_type: "Gems",
+                amount: reward.amount ?? reward.price
+              };
+              if (!apiKey) {
+                if (!adminUser || !adminPass) {
+                  try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
+                  return dmChannel.send("❌ Server auth not configured. Contact an admin.");
+                }
+                body.admin_user = adminUser;
+                body.admin_pass = adminPass;
               }
-              body.admin_user = adminUser;
-              body.admin_pass = adminPass;
+              grantResp = await axios.post(endpoint, body, axiosOpts);
+            } catch (err) {
+              const errMsg = err.response?.data?.error ?? err.message ?? String(err);
+              console.error("Grant call failed:", errMsg);
+              try {
+                await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
+                return dmChannel.send(`❌ Grant failed: ${errMsg}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
+              } catch (refundErr) {
+                console.error("Refund failed after grant error:", refundErr);
+                return dmChannel.send(`‼️ Grant failed: ${errMsg}. Refund attempt also failed — contact admins immediately.`);
+              }
             }
-            grantResp = await axios.post(endpoint, body, axiosOpts);
-          } catch (err) {
-            const errMsg = err.response?.data?.error ?? err.message ?? String(err);
-            console.error("Grant call failed:", errMsg);
+
+            if (!grantResp.data || !grantResp.data.success) {
+              const apiErr = grantResp.data?.error ?? 'unknown';
+              try {
+                await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
+                return dmChannel.send(`❌ Grant endpoint returned error: ${apiErr}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
+              } catch (refundErr) {
+                console.error("Rollback failed after endpoint error:", refundErr);
+                return dmChannel.send(`‼️ Grant endpoint error: ${apiErr}. Refund failed — contact admins.`);
+              }
+            }
+
+            // success embed to user
+            const successEmbed = new EmbedBuilder()
+              .setTitle("Reward claimed")
+              .setColor(embedColor)
+              .addFields(
+                { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
+                { name: "PlayFab ID", value: `${playfabId}`, inline: true },
+                { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
+                { name: "Reward", value: `${reward.name}`, inline: true },
+                { name: "Amount granted", value: `**${reward.amount ?? reward.price}**`, inline: true },
+                { name: "Price deducted", value: `${coinEmoji}${reward.price}`, inline: true },
+                { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
+                { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
+              )
+              .setTimestamp()
+              .setFooter({ text: "Keep this as proof of the transaction" });
+
+            await dmChannel.send({ embeds: [successEmbed] });
+
+            // try to alert channel about success (if configured)
             try {
-              await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
-              return dmChannel.send(`❌ Grant failed: ${errMsg}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
-            } catch (refundErr) {
-              console.error("Refund failed after grant error:", refundErr);
-              return dmChannel.send(`‼️ Grant failed: ${errMsg}. Refund attempt also failed — contact admins immediately.`);
-            }
-          }
-
-          if (!grantResp.data || !grantResp.data.success) {
-            const apiErr = grantResp.data?.error ?? 'unknown';
-            try {
-              await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
-              return dmChannel.send(`❌ Grant endpoint returned error: ${apiErr}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
-            } catch (refundErr) {
-              console.error("Rollback failed after endpoint error:", refundErr);
-              return dmChannel.send(`‼️ Grant endpoint error: ${apiErr}. Refund failed — contact admins.`);
-            }
-          }
-
-          // success: user DM embed
-          const resultEmbed = new EmbedBuilder()
-            .setTitle("Reward claimed")
-            .setColor(embedColor)
-            .addFields(
-              { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
-              { name: "PlayFab ID", value: `${playfabId}`, inline: true },
-              { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
-              { name: "Reward", value: `${reward.name}`, inline: true },
-              { name: "Amount granted", value: `**${reward.amount ?? reward.price}**`, inline: true },
-              { name: "Price deducted", value: `${coinEmoji}${reward.price}`, inline: true },
-              { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
-              { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
-            )
-            .setTimestamp()
-            .setFooter({ text: "Keep this as proof of the transaction" });
-
-          await dmChannel.send({ embeds: [resultEmbed] });
-
-          // send alert to configured channel if enabled
-          try {
-            const cfg = await GuildConfig.findOne({ guildId });
-            if (cfg?.rewardAlerts && cfg?.rewardChannelId) {
-              // fetch the guild and channel
-              const guildToUse = btnInt.guild ?? (await btnInt.client.guilds.fetch(guildId).catch(()=>null));
-              if (guildToUse) {
-                const channel = await guildToUse.channels.fetch(cfg.rewardChannelId).catch(()=>null);
-                if (channel && channel.isTextBased && channel.send) {
-                  const alertEmbed = new EmbedBuilder()
-                    .setTitle("Reward Payout")
-                    .setColor(alertColor)
-                    .setDescription(`A reward was just granted by **${btnInt.user.tag}**.`)
-                    .addFields(
-                      { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
-                      { name: "PlayFab ID", value: `${playfabId}`, inline: true },
-                      { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
-                      { name: "Reward", value: `${reward.name} (${reward.rewardId})`, inline: true },
-                      { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
-                      { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
-                      { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
-                      { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
-                    )
-                    .setTimestamp()
-                    .setFooter({ text: `Claimed by ${btnInt.user.tag}` });
-                  await channel.send({ embeds: [alertEmbed] }).catch(err => {
-                    console.error("Failed to send reward alert to channel:", err);
-                  });
+              const cfg = await GuildConfig.findOne({ guildId });
+              if (cfg?.rewardAlerts && cfg?.rewardChannelId) {
+                const guildToUse = btnInt.guild ?? (await btnInt.client.guilds.fetch(guildId).catch(()=>null));
+                if (guildToUse) {
+                  const channel = await guildToUse.channels.fetch(cfg.rewardChannelId).catch(()=>null);
+                  if (channel && channel.isTextBased && channel.send) {
+                    const alertEmbed = new EmbedBuilder()
+                      .setTitle("Reward Payout")
+                      .setColor(alertColor)
+                      .setDescription(`A reward was just granted automatically.`)
+                      .addFields(
+                        { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
+                        { name: "PlayFab ID", value: `${playfabId}`, inline: true },
+                        { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
+                        { name: "Reward", value: `${reward.name} (${reward.rewardId})`, inline: true },
+                        { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
+                        { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
+                        { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
+                        { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
+                      )
+                      .setTimestamp()
+                      .setFooter({ text: `Claimed by ${btnInt.user.tag}` });
+                    await channel.send({ embeds: [alertEmbed] }).catch(err => console.error("Failed to send reward alert:", err));
+                  }
                 }
               }
+            } catch (err) {
+              console.error("Alert sending error:", err);
             }
-          } catch (err) {
-            console.error("Alert sending error:", err);
-          }
 
-          try {
-            await btnInt.editReply({ content: `✅ Done — check your DMs for details.`, ephemeral: true });
-          } catch {}
+            try { await btnInt.editReply({ content: `✅ Done — check your DMs for details.`, ephemeral: true }); } catch {}
+            return;
+          } else {
+            // non-gems flow: money already deducted, post manual alert and react with ✅ for admins
+            try {
+              const cfg = await GuildConfig.findOne({ guildId });
+              if (!cfg?.rewardChannelId || !cfg?.rewardAlerts) {
+                // inform user that admins not notified automatically
+                await dmChannel.send("✅ Your Money has been deducted. Administrators were not notified automatically (no channel configured). Please contact an admin to grant the reward.");
+                return;
+              }
+
+              const guildToUse = btnInt.guild ?? (await btnInt.client.guilds.fetch(guildId).catch(()=>null));
+              if (!guildToUse) {
+                // fallback: inform user
+                await dmChannel.send("✅ Your Money has been deducted. Administrators will need to grant your reward manually. (Could not fetch guild to send alert).");
+                return;
+              }
+
+              const channel = await guildToUse.channels.fetch(cfg.rewardChannelId).catch(()=>null);
+              if (!channel || !channel.isTextBased) {
+                await dmChannel.send("✅ Your Money has been deducted. Administrators could not be notified (invalid alert channel). Contact an admin.");
+                return;
+              }
+
+              const manualEmbed = new EmbedBuilder()
+                .setTitle("Manual Reward Required")
+                .setColor(manualColor)
+                .setDescription("This reward requires manual granting by an administrator. React with ✅ when you've granted it.")
+                .addFields(
+                  { name: "Discord user", value: `${btnInt.user.tag} (${btnInt.user.id})`, inline: true },
+                  { name: "PlayFab ID", value: `${playfabId}`, inline: true },
+                  { name: "CardWars ID", value: `${cardwarsId}`, inline: true },
+                  { name: "Reward", value: `${reward.name} (${reward.rewardId})`, inline: true },
+                  { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
+                  { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
+                  { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
+                  { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true },
+                  { name: "GuildId", value: `${guildId}`, inline: true }
+                )
+                .setTimestamp()
+                .setFooter({ text: "React with ✅ when you manually grant this reward" });
+
+              const sent = await channel.send({ embeds: [manualEmbed] });
+              try { await sent.react('✅'); } catch (e) { console.error('React failed', e); }
+
+              await dmChannel.send("✅ Your Money has been deducted. Administrators have been notified and will grant your reward manually. You will receive a DM when it is granted.");
+              try { await btnInt.editReply({ content: `✅ Done — administrators were notified.`, ephemeral: true }); } catch {}
+              return;
+            } catch (err) {
+              console.error("Manual reward alert failed:", err);
+              try {
+                await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
+                return dmChannel.send("❌ Failed to notify administrators about manual reward. Your money has been refunded. Contact admins.");
+              } catch (refundErr) {
+                console.error("Refund failed:", refundErr);
+                return dmChannel.send("‼️ Failed to notify administrators and refund money — contact admins immediately.");
+              }
+            }
+          }
 
         } catch (err) {
           console.error("DM flow error:", err);
@@ -305,7 +354,7 @@ export default {
       return;
     }
 
-    // --- CHANNEL: set reward alert channel (mods only) ---
+    // --- CHANNEL (mods only) ---
     if (sub === "channel") {
       if (!isInt) return replySafe(interactionOrMessage, "❌ Use the slash command to set the channel.", { ephemeral: true });
       const isModerator = await isMod(userId, guildId);
@@ -315,10 +364,10 @@ export default {
       if (!channelOption) return replySafe(interactionOrMessage, "❌ Channel not provided or invalid.", { ephemeral: true });
 
       try {
-        const cfg = await GuildConfig.findOneAndUpdate(
+        await GuildConfig.findOneAndUpdate(
           { guildId },
           { $set: { rewardChannelId: channelOption.id, rewardAlerts: true } },
-          { upsert: true, new: true }
+          { upsert: true }
         );
         return replySafe(interactionOrMessage, `✅ Reward alerts channel set to <#${channelOption.id}> and alerts enabled.`, { ephemeral: true });
       } catch (err) {
@@ -327,7 +376,7 @@ export default {
       }
     }
 
-    // --- ALERTS: toggle alerts on/off (mods only) ---
+    // --- ALERTS toggle (mods only) ---
     if (sub === "alerts") {
       const isModerator = await isMod(userId, guildId);
       if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can toggle alerts.", { ephemeral: true });
@@ -335,7 +384,6 @@ export default {
       try {
         const cfg = await GuildConfig.findOne({ guildId });
         if (!cfg) {
-          // create config with alerts disabled by default? we'll enable by toggling
           const newCfg = new GuildConfig({ guildId, rewardAlerts: false });
           await newCfg.save();
           return replySafe(interactionOrMessage, `✅ Reward alerts toggled: **disabled**. Use /reward channel to set channel and enable.`, { ephemeral: true });
@@ -350,7 +398,7 @@ export default {
       }
     }
 
-    // --- ADD (mods) ---
+    // --- ADD / REMOVE / LIST (mods only) ---
     if (sub === "add") {
       const isModerator = await isMod(userId, guildId);
       if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can add rewards.", { ephemeral: true });
@@ -377,7 +425,6 @@ export default {
       }
     }
 
-    // --- REMOVE ---
     if (sub === "remove") {
       const isModerator = await isMod(userId, guildId);
       if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can remove rewards.", { ephemeral: true });
@@ -388,7 +435,6 @@ export default {
       return replySafe(interactionOrMessage, `✅ Removed reward \`${rewardId}\`.`, { ephemeral: true });
     }
 
-    // --- LIST ---
     if (sub === "list") {
       const isModerator = await isMod(userId, guildId);
       if (!isModerator) return replySafe(interactionOrMessage, "❌ Only moderators can view rewards list.", { ephemeral: true });

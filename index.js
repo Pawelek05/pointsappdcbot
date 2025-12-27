@@ -1,11 +1,12 @@
-// index.js (pełen plik - podmień oryginał)
-import { Client, GatewayIntentBits, Partials, Collection, REST, Routes } from 'discord.js';
+// index.js
+import { Client, GatewayIntentBits, Partials, Collection, REST, Routes, EmbedBuilder } from 'discord.js';
 import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import GuildConfig from './models/GuildConfig.js';
 import PlayFab from 'playfab-sdk';
-import ocrHandler from './events/messageCreate.ocr.js'; // <-- import OCR handler
+import ocrHandler from './events/messageCreate.ocr.js';
+import isMod from './utils/isMod.js';
 
 const config = JSON.parse(fs.readFileSync(new URL('./config.json', import.meta.url), 'utf-8'));
 
@@ -20,15 +21,17 @@ if (!TOKEN || !CLIENT_ID || !MONGO_URI || !process.env.PLAYFAB_SECRET) {
   process.exit(1);
 }
 
-const client = new Client({ 
+const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.DirectMessages,   // ✅ REQUIRED FOR DM
-    GatewayIntentBits.MessageContent    // ✅ REQUIRED TO READ TEXT
+    GatewayIntentBits.DirectMessages,
+    GatewayIntentBits.MessageContent
   ],
   partials: [
-    Partials.Channel                    // ✅ REQUIRED FOR DM CHANNELS
+    Partials.Channel,
+    Partials.Message,
+    Partials.Reaction
   ]
 });
 client.commands = new Collection();
@@ -57,9 +60,9 @@ client.once('ready', async () => {
   const slashCommands = [];
 
   for (const cmd of client.commands.values()) {
-    slashCommands.push({ 
-      name: cmd.name, 
-      description: cmd.description || 'No description', 
+    slashCommands.push({
+      name: cmd.name,
+      description: cmd.description || 'No description',
       options: cmd.options || []
     });
   }
@@ -107,10 +110,17 @@ client.on('messageCreate', async message => {
     const command = client.commands.get(commandName);
     if (!command) return;
 
-    const allowed = await hasPermission(message.author.id, message.guild.id, message.guild.ownerId);
+    // allow /prefix reward claim for everyone
+    let allowed = await hasPermission(message.author.id, message.guild.id, message.guild.ownerId);
+    if (!allowed) {
+      if (commandName === 'reward') {
+        const subArg = args[0];
+        if (!subArg || subArg.toLowerCase() === 'claim') allowed = true;
+      }
+    }
     if (!allowed) return message.reply("❌ You don't have permission to use this command.");
 
-    try { await command.execute(message, args); } 
+    try { await command.execute(message, args); }
     catch (err) { console.error(err); message.reply("❌ Command error"); }
   } catch (err) {
     console.error('messageCreate handler error:', err);
@@ -124,16 +134,21 @@ client.on('interactionCreate', async interaction => {
     const cmd = client.commands.get(interaction.commandName);
     if (!cmd) return;
 
-    // build args from options (ordered as in cmd.options)
-    const args = cmd.options?.map(opt => interaction.options.get(opt.name)?.value) || [];
+    // get subcommand if any
+    let sub = null;
+    try { sub = interaction.options.getSubcommand(false); } catch (e) { sub = null; }
 
-    // fetch guild to get ownerId if needed
-    const guild = interaction.guild ?? await client.guilds.fetch(interaction.guildId).catch(()=>null);
-    const allowed = await hasPermission(interaction.user.id, guild?.id, guild?.ownerId);
+    // allow public reward claim
+    let allowed = await hasPermission(interaction.user.id, interaction.guildId ? interaction.guildId : null, (interaction.guild ? interaction.guild.ownerId : null));
+    if (!allowed) {
+      if (cmd.name === 'reward' && (!sub || sub === 'claim')) allowed = true;
+    }
     if (!allowed) return interaction.reply({ content: "❌ You don't have permission to use this command.", ephemeral: true });
 
+    // build args array for compatibility
+    const args = cmd.options?.map(opt => interaction.options.get(opt.name)?.value) || [];
+
     try {
-      // pass the real interaction object (commands handle both message and interaction)
       await cmd.execute(interaction, args);
     } catch (err) {
       console.error(err);
@@ -143,6 +158,67 @@ client.on('interactionCreate', async interaction => {
     }
   } catch (err) {
     console.error('interactionCreate handler error:', err);
+  }
+});
+
+// --- Reaction handler for manual grants ---
+client.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    if (user.bot) return;
+
+    if (reaction.partial) {
+      try { await reaction.fetch(); } catch (e) { console.error('Failed to fetch reaction partial', e); return; }
+    }
+    const message = reaction.message;
+    if (message.partial) {
+      try { await message.fetch(); } catch (e) { console.error('Failed to fetch message partial', e); return; }
+    }
+
+    if (reaction.emoji.name !== '✅') return;
+
+    const embed = message.embeds?.[0];
+    if (!embed || embed.title !== 'Manual Reward Required') return;
+
+    // already processed?
+    const grantedField = embed.fields.find(f => f.name === 'Granted by');
+    if (grantedField) return;
+
+    // extract guildId field (fallback to message.guild.id)
+    const guildIdField = embed.fields.find(f => f.name === 'GuildId');
+    const guildId = guildIdField?.value ?? (message.guild?.id ?? null);
+
+    // check moderator
+    const allowed = await isMod(user.id, guildId);
+    if (!allowed) return;
+
+    // extract discord id
+    const discordUserField = embed.fields.find(f => f.name === 'Discord user')?.value || '';
+    const discordIdMatch = discordUserField.match(/\((\d{16,20})\)$/);
+    const discordId = discordIdMatch ? discordIdMatch[1] : null;
+
+    // edit embed: mark granted
+    const newEmbed = EmbedBuilder.from(embed)
+      .setColor(0x2ECC71)
+      .addFields({ name: 'Granted by', value: `${user.tag} (${user.id})`, inline: true });
+
+    await message.edit({ embeds: [newEmbed] }).catch(err => console.error('Failed to edit manual reward message', err));
+
+    // DM the player
+    if (discordId) {
+      try {
+        const player = await client.users.fetch(discordId).catch(()=>null);
+        if (player) {
+          await player.send(`Your requested reward **${embed.fields.find(f=>f.name==='Reward')?.value ?? 'unknown'}** has been **granted** by ${user.tag}. Congratulations!`).catch(()=>{});
+        }
+      } catch (e) {
+        console.error('Failed to DM player after manual grant', e);
+      }
+    }
+
+    // optionally remove the reaction from the moderator
+    try { await reaction.users.remove(user.id).catch(()=>{}); } catch (e) {}
+  } catch (err) {
+    console.error('messageReactionAdd handler error:', err);
   }
 });
 
