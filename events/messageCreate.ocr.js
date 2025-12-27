@@ -1,9 +1,10 @@
 // events/messageCreate.ocr.js
-// Robust OCR handler using Tesseract.recognize (compatible with tesseract.js v7).
+// Robust OCR handler with broad compatibility for different tesseract.js versions (including v7).
 // Sends only the ID (16 hex chars) when recognized. Messages in English.
 
 import GuildConfig from '../models/GuildConfig.js';
 import * as Tesseract from 'tesseract.js';
+import { createWorker as createWorkerNamed } from 'tesseract.js';
 import sharp from 'sharp';
 import PlayFab from 'playfab-sdk';
 
@@ -61,29 +62,111 @@ function generateVariants(s) {
   return results;
 }
 
-// ---------- Recognition (fallback-only) ----------
-// Using Tesseract.recognize to remain compatible with tesseract.js v7+.
+// ---------- Recognition compatibility layer ----------
+// We'll try multiple strategies in order:
+// 1) Tesseract.recognize (if exported as function or on default)
+// 2) createWorker -> use worker.recognize (without forcing load/init) for versions that support it
+// 3) fallback to failing gracefully (ask user to install a compatible version)
 
 async function tesseractRecognizeBuffer(buffer) {
+  // Strategy A: direct recognize functions on the imported namespace
   try {
-    // Try string 'eng' first; if that errors, try array ['eng'].
-    try {
-      const res = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
-      return (res?.data?.text) ? res.data.text : '';
-    } catch (e1) {
-      // fallback to array form (some versions require this)
+    // Prefer direct function on namespace
+    if (typeof Tesseract.recognize === 'function') {
       try {
-        const res2 = await Tesseract.recognize(buffer, ['eng'], { logger: () => {} });
-        return (res2?.data?.text) ? res2.data.text : '';
-      } catch (e2) {
-        console.error('Tesseract.recognize failed (both tries):', e1, e2);
-        return '';
+        const res = await Tesseract.recognize(buffer, 'eng', { logger: () => {} });
+        return res?.data?.text ?? '';
+      } catch (err1) {
+        // try alternate signature (some builds want array)
+        try {
+          const res2 = await Tesseract.recognize(buffer, ['eng'], { logger: () => {} });
+          return res2?.data?.text ?? '';
+        } catch (err2) {
+          console.warn('Tesseract.recognize attempts failed:', err1, err2);
+        }
       }
     }
-  } catch (err) {
-    console.error('Tesseract.recognize unexpected error:', err);
-    return '';
+
+    // Some bundlers expose default
+    if (Tesseract && typeof Tesseract.default === 'object' && typeof Tesseract.default.recognize === 'function') {
+      try {
+        const res = await Tesseract.default.recognize(buffer, 'eng', { logger: () => {} });
+        return res?.data?.text ?? '';
+      } catch (err1) {
+        try {
+          const res2 = await Tesseract.default.recognize(buffer, ['eng'], { logger: () => {} });
+          return res2?.data?.text ?? '';
+        } catch (err2) {
+          console.warn('Tesseract.default.recognize attempts failed:', err1, err2);
+        }
+      }
+    }
+  } catch (e) {
+    // continue to next strategy
+    console.warn('Tesseract direct recognize detection error:', e);
   }
+
+  // Strategy B: try createWorker() if available. Some versions expose createWorker.
+  const createWorker = (typeof createWorkerNamed === 'function') ? createWorkerNamed : (Tesseract && typeof Tesseract.createWorker === 'function' ? Tesseract.createWorker : null);
+  if (createWorker) {
+    let worker = null;
+    try {
+      worker = createWorker();
+      // Many versions require load/init; others may accept recognize directly.
+      // We try calling recognize directly, if it errors we try load/init sequences guarded by try/catch.
+      if (typeof worker.recognize === 'function') {
+        try {
+          const r = await worker.recognize(buffer);
+          // optionally terminate worker if termination available
+          if (typeof worker.terminate === 'function') {
+            try { await worker.terminate(); } catch(e){/*ignore*/ }
+          }
+          return r?.data?.text ?? '';
+        } catch (err) {
+          // Try load -> loadLanguage -> initialize -> recognize (if those functions exist)
+          try {
+            if (typeof worker.load === 'function') await worker.load();
+            if (typeof worker.loadLanguage === 'function') {
+              try { await worker.loadLanguage(['eng']); } catch(e){ await worker.loadLanguage('eng'); }
+            }
+            if (typeof worker.initialize === 'function') await worker.initialize('eng');
+            if (typeof worker.setParameters === 'function') {
+              try {
+                await worker.setParameters({
+                  tessedit_char_whitelist: '0123456789ABCDEF:',
+                  tessedit_pageseg_mode: '7'
+                });
+              } catch(e){}
+            }
+            const r2 = await worker.recognize(buffer);
+            if (typeof worker.terminate === 'function') {
+              try { await worker.terminate(); } catch(e){/*ignore*/ }
+            }
+            return r2?.data?.text ?? '';
+          } catch (err2) {
+            // try to terminate
+            if (worker && typeof worker.terminate === 'function') {
+              try { await worker.terminate(); } catch(e){/*ignore*/ }
+            }
+            console.warn('Worker recognize attempts failed:', err, err2);
+          }
+        }
+      } else {
+        // worker has no recognize - give up on worker
+        if (worker && typeof worker.terminate === 'function') {
+          try { await worker.terminate(); } catch(e){/*ignore*/ }
+        }
+      }
+    } catch (e) {
+      // if worker creation fails, ignore and fall through
+      console.warn('createWorker attempt failed:', e);
+      try { if (worker && typeof worker.terminate === 'function') await worker.terminate(); } catch(e){/*ignore*/}
+    }
+  }
+
+  // If we reach here none of the above strategies worked.
+  console.error('Tesseract: no compatible recognize method found. Consider installing tesseract.js@2.1.5 for worker support or adjust your tesseract package.');
+  return '';
 }
 
 // ---------- Preprocessing variants (aggressive, slower) ----------
