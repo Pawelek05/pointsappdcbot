@@ -1,4 +1,4 @@
-// commands/addcreature.js
+// commands/addcreature.js (with debug logs)
 import axios from 'axios';
 import { EmbedBuilder } from 'discord.js';
 import { replySafe, isInteraction, getStringOption, getIntegerOption } from '../utils/commandHelpers.js';
@@ -9,7 +9,7 @@ export default {
   description: "Add a creature to a player's inventory (mods only)",
   options: [
     { name: "cardwarsid", description: "CardWars ID (multiplayer name or username)", type: 3, required: true },
-    { name: "creature", description: "Creature ID (e.g. CornBall_Base or GhostRex_Special)", type: 3, required: true },
+    { name: "creature", description: "Creature ID (/creatureslist)", type: 3, required: true },
     { name: "starrating", description: "Star rating (1-5) - optional", type: 4, required: false }
   ],
   async execute(interactionOrMessage, args = []) {
@@ -27,7 +27,7 @@ export default {
 
     if (!cardwarsId || !creatureId) return replySafe(interactionOrMessage, "❌ Usage: /addcreature <cardwarsid> <creature> [starrating]", { ephemeral: true });
 
-    let starRating = 1;
+    let starRating = 5;
     if (starRatingOpt !== null && starRatingOpt !== undefined) {
       starRating = Number(starRatingOpt);
       if (!Number.isFinite(starRating) || starRating < 1 || starRating > 5) {
@@ -56,10 +56,23 @@ export default {
       body.admin_pass = adminPass;
     }
 
+    // DEBUG: log request that will be sent
+    try {
+      console.log('[ADDCREATURE] will POST to:', url);
+      console.log('[ADDCREATURE] payload:', JSON.stringify(body));
+      if (apiKey) console.log('[ADDCREATURE] using API key header');
+      else console.log('[ADDCREATURE] using DB_LOGIN/DB_PASSWORD in body (fallback)');
+    } catch (e) { /* ignore logging errors */ }
+
     // send request
     try {
-      const axiosOpts = { timeout: 15_000 };
-      if (apiKey) axiosOpts.headers = { 'X-API-KEY': apiKey };
+      const axiosOpts = {
+        timeout: 15_000,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'X-API-KEY': apiKey } : {})
+        }
+      };
 
       const res = await axios.post(url, body, axiosOpts);
       const data = res.data;
@@ -86,8 +99,24 @@ export default {
       return replySafe(interactionOrMessage, null, { embeds: [embed], ephemeral: true });
 
     } catch (err) {
-      console.error('addcreature request failed:', err?.response?.data ?? err?.message ?? err);
-      const message = err?.response?.data?.error ?? err?.message ?? 'Request failed';
+      // detailed axios error handling
+      const status = err?.response?.status;
+      const respData = err?.response?.data;
+      console.error('[ADDCREATURE] request failed status=', status, 'data=', respData ?? err?.message ?? err);
+
+      // helpful messages for common cases
+      if (status === 405) {
+        return replySafe(interactionOrMessage, `❌ Server reports method not allowed (405). The bot attempted a GET/invalid method — but code uses POST. Check server and URL. Full server message: ${JSON.stringify(respData)}`, { ephemeral: true });
+      }
+      if (status === 401 || status === 403) {
+        return replySafe(interactionOrMessage, `❌ Unauthorized (status ${status}). Check PYAN_API_KEY on both sides or DB_LOGIN/DB_PASSWORD. Server says: ${JSON.stringify(respData)}`, { ephemeral: true });
+      }
+      if (status === 404) {
+        return replySafe(interactionOrMessage, `❌ Not found (404). Check PYAN_ENDPOINT value — it should be the base URL (e.g. https://youruser.pythonanywhere.com). Server says: ${JSON.stringify(respData)}`, { ephemeral: true });
+      }
+
+      // generic fallback
+      const message = respData?.error ?? err?.message ?? 'Request failed';
       return replySafe(interactionOrMessage, `❌ Request failed: ${message}`, { ephemeral: true });
     }
   }
