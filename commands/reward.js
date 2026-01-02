@@ -44,11 +44,28 @@ function pfSubtractUserVirtualCurrency(playfabId, virtualCurrency, amount) {
     );
   });
 }
+function pfAddUserVirtualCurrency(playfabId, virtualCurrency, amount) {
+  return new Promise((resolve, reject) => {
+    PlayFab.PlayFabServer.AddUserVirtualCurrency(
+      { PlayFabId: playfabId, VirtualCurrency: virtualCurrency, Amount: amount },
+      (err, res) => err ? reject(err) : resolve(res)
+    );
+  });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // In-memory locks to prevent concurrent claim for same PlayFabId in-process.
 // NOTE: this prevents race-conditions within this bot instance. For absolute safety across multiple
 // bot instances you must use PlayFab-side atomic ops (configured via PLAYFAB_VC_CURRENCY below).
 const claimLocks = new Set();
+
+// short cooldown map to prevent immediate repeated claims (protects against eventual consistency)
+const recentClaims = new Map();
+// cooldown in ms
+const RECENT_CLAIM_COOLDOWN = 10 * 1000;
 
 export default {
   name: "reward",
@@ -157,6 +174,12 @@ export default {
           const pfMsg = collected.first();
           const playfabId = pfMsg.content.trim();
 
+          // quick cooldown check (prevent immediate repeat claims)
+          const last = recentClaims.get(playfabId);
+          if (last && (Date.now() - last) < RECENT_CLAIM_COOLDOWN) {
+            return dmChannel.send("❌ A recent claim was registered for this PlayFab ID. Wait a few seconds and try again.");
+          }
+
           // Acquire lock for this PlayFabId to avoid concurrent claims in this bot instance
           if (claimLocks.has(playfabId)) {
             return dmChannel.send("❌ You already have a claim in progress. Please finish or wait a moment before trying again.");
@@ -196,21 +219,57 @@ export default {
                 // Subtract amount (virtual currency APIs expect integer amounts).
                 const amountToSubtract = Math.floor(rawPrice);
                 const subRes = await pfSubtractUserVirtualCurrency(playfabId, vcCode, amountToSubtract);
-                const newBalance = typeof subRes?.data?.Balance === 'number' ? subRes.data.Balance : (subRes?.Balance ?? null);
 
-                // update Data.Money to stay consistent if possible
+                // Try to read returned balance in multiple possible shapes
+                let returnedBalance = null;
+                if (subRes && typeof subRes === 'object') {
+                  // Try common shapes
+                  if (typeof subRes.Balance === 'number') returnedBalance = subRes.Balance;
+                  else if (subRes.data && typeof subRes.data.Balance === 'number') returnedBalance = subRes.data.Balance;
+                  else if (subRes.data && subRes.data.Value && !isNaN(Number(subRes.data.Value))) returnedBalance = Number(subRes.data.Value);
+                }
+
+                // If we didn't get a numeric returnedBalance, attempt to re-fetch user data a few times to verify change
+                let newMoney = returnedBalance !== null ? returnedBalance : (oldMoney - rawPrice);
+
+                if (returnedBalance === null) {
+                  // re-fetch and try to parse Data.Money up to 5 times
+                  let verified = false;
+                  for (let attempt = 0; attempt < 5; attempt++) {
+                    await sleep(300);
+                    try {
+                      const after = await pfGetUserData(playfabId);
+                      const afterData = after?.data?.Data ?? {};
+                      const afterMoney = Number(afterData.Money?.Value ?? (typeof after?.data?.Balance === 'number' ? after.data.Balance : NaN));
+                      if (!Number.isNaN(afterMoney)) {
+                        newMoney = afterMoney;
+                        verified = true;
+                        break;
+                      }
+                    } catch (e) {
+                      // ignore, retry
+                    }
+                  }
+                  if (!verified) {
+                    // try to rollback (refund VC) and abort
+                    try {
+                      await pfAddUserVirtualCurrency(playfabId, vcCode, amountToSubtract);
+                      try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch (e) {}
+                    } catch (refundErr) {
+                      console.error('Failed to refund VC after unverifiable subtract:', refundErr);
+                    }
+                    return dmChannel.send("‼️ Could not verify PlayFab balance after deducting virtual currency. The deduction was rolled back — contact admins if problem persists.");
+                  }
+                } // end re-fetch block
+
+                // try to sync Data.Money to reflect returned newMoney (best-effort)
                 try {
-                  if (typeof newBalance === 'number') {
-                    await pfUpdateUserData(playfabId, { Money: String(newBalance) });
+                  if (!Number.isNaN(Number(newMoney))) {
+                    await pfUpdateUserData(playfabId, { Money: String(Math.floor(Number(newMoney))) });
                   }
                 } catch (updateErr) {
                   console.error('Failed to sync Money field after VC subtract:', updateErr);
-                  // not fatal — continue
                 }
-
-                // proceed with grant flow (gems vs manual)
-                // reuse newBalance as newMoney for embeds
-                const newMoney = newBalance !== null ? newBalance : (oldMoney - rawPrice);
 
                 // detect gems-type
                 const rid = String(reward.rewardId ?? '').toLowerCase();
@@ -231,11 +290,7 @@ export default {
                   if (!endpointRaw) {
                     // refund via VC add
                     try {
-                      // Add back the currency
-                      await new Promise((resolve, reject) => {
-                        PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                      });
-                      // try to sync Money field back
+                      await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
                       try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                     } catch (refundErr) { console.error('Refund failed (vc add) after missing PYAN_ENDPOINT:', refundErr); }
                     return dmChannel.send("❌ Server endpoint not configured (PYAN_ENDPOINT). Contact an admin.");
@@ -265,9 +320,7 @@ export default {
                       if (!adminUser || !adminPass) {
                         // refund
                         try {
-                          await new Promise((resolve, reject) => {
-                            PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                          });
+                          await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
                           try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                         } catch (refundErr) { console.error('Refund failed (vc add) after missing admin auth:', refundErr); }
                         return dmChannel.send("❌ Server auth not configured. Contact an admin.");
@@ -281,9 +334,7 @@ export default {
                     console.error("Grant call failed:", errMsg);
                     try {
                       // refund via VC add
-                      await new Promise((resolve, reject) => {
-                        PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                      });
+                      await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
                       try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                       return dmChannel.send(`❌ Grant failed: ${errMsg}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
                     } catch (refundErr) {
@@ -296,9 +347,7 @@ export default {
                     const apiErr = grantResp.data?.error ?? 'unknown';
                     try {
                       // refund via VC add
-                      await new Promise((resolve, reject) => {
-                        PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                      });
+                      await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
                       try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                       return dmChannel.send(`❌ Grant endpoint returned error: ${apiErr}. Your Money has been refunded to ${coinEmoji}${oldMoney}.`);
                     } catch (refundErr) {
@@ -319,12 +368,15 @@ export default {
                       { name: "Amount granted", value: `**${reward.amount ?? reward.price}**`, inline: true },
                       { name: "Price deducted", value: `${coinEmoji}${reward.price}`, inline: true },
                       { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
-                      { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
+                      { name: "New Money", value: `${coinEmoji}${Math.floor(newMoney)}`, inline: true }
                     )
                     .setTimestamp()
                     .setFooter({ text: "Keep this as proof of the transaction" });
 
                   await dmChannel.send({ embeds: [successEmbed] });
+
+                  // mark recent claim to prevent immediate repeat
+                  recentClaims.set(playfabId, Date.now());
 
                   // try to alert channel about success (if configured)
                   try {
@@ -346,7 +398,7 @@ export default {
                               { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
                               { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
                               { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
-                              { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true }
+                              { name: "New Money", value: `${coinEmoji}${Math.floor(newMoney)}`, inline: true }
                             )
                             .setTimestamp()
                             .setFooter({ text: `Claimed by ${btnInt.user.tag}` });
@@ -363,6 +415,9 @@ export default {
                 } else {
                   // non-gems flow: money already deducted, post manual alert and react with ✅ for admins
                   try {
+                    // mark recent claim
+                    recentClaims.set(playfabId, Date.now());
+
                     const cfg = await GuildConfig.findOne({ guildId });
                     if (!cfg?.rewardChannelId || !cfg?.rewardAlerts) {
                       // inform user that admins not notified automatically
@@ -397,15 +452,8 @@ export default {
                           await dmChannel.send("⏲️ No answer received — cancelled.");
                           // refund to be safe because player didn't specify what they want
                           try {
-                            // refund VC if used
-                            if (vcCode) {
-                              await new Promise((resolve, reject) => {
-                                PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                              });
-                              try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
-                            } else {
-                              await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
-                            }
+                            await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
+                            try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                           } catch (e) { console.error('Refund failed on timeout after creature prompt', e); }
                           return;
                         }
@@ -437,7 +485,7 @@ export default {
                         { name: "Amount", value: `**${reward.amount ?? reward.price}**`, inline: true },
                         { name: "Price (deducted)", value: `${coinEmoji}${reward.price}`, inline: true },
                         { name: "Previous Money", value: `${coinEmoji}${oldMoney}`, inline: true },
-                        { name: "New Money", value: `${coinEmoji}${newMoney}`, inline: true },
+                        { name: "New Money", value: `${coinEmoji}${Math.floor(newMoney)}`, inline: true },
                         { name: "GuildId", value: `${guildId}`, inline: true }
                       )
                       .setTimestamp()
@@ -459,14 +507,8 @@ export default {
                     console.error("Manual reward alert failed:", err);
                     try {
                       // refund VC
-                      if (vcCode) {
-                        await new Promise((resolve, reject) => {
-                          PlayFab.PlayFabServer.AddUserVirtualCurrency({ PlayFabId: playfabId, VirtualCurrency: vcCode, Amount: Math.floor(rawPrice) }, (err,res) => err ? reject(err) : resolve(res));
-                        });
-                        try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
-                      } else {
-                        await pfUpdateUserData(playfabId, { Money: String(oldMoney) });
-                      }
+                      await pfAddUserVirtualCurrency(playfabId, vcCode, Math.floor(rawPrice));
+                      try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch {}
                       return dmChannel.send("❌ Failed to notify administrators about manual reward. Your money has been refunded. Contact admins.");
                     } catch (refundErr) {
                       console.error("Refund failed:", refundErr);
@@ -495,18 +537,31 @@ export default {
 
               // Immediately re-fetch to verify deduction — defensive check for concurrent races / eventual consistency
               try {
-                const after = await pfGetUserData(playfabId);
-                const afterData = after?.data?.Data ?? {};
-                const afterMoney = Number(afterData.Money?.Value ?? "0");
-
-                if (Number.isNaN(afterMoney)) {
-                  // weird state: couldn't read new money
-                  // try to refund to be safe and abort
-                  try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch (refundErr) { console.error('Refund failed after invalid afterMoney', refundErr); }
-                  return dmChannel.send("‼️ After deduction the PlayFab Money value was invalid. The transaction was rolled back — contact admins.");
+                let afterMoney = NaN;
+                let verified = false;
+                for (let attempt = 0; attempt < 5; attempt++) {
+                  await sleep(500);
+                  try {
+                    const after = await pfGetUserData(playfabId);
+                    const afterData = after?.data?.Data ?? {};
+                    const parsed = Number(afterData.Money?.Value ?? NaN);
+                    if (!Number.isNaN(parsed)) {
+                      afterMoney = parsed;
+                      verified = true;
+                      break;
+                    }
+                  } catch (e) {
+                    // retry
+                    console.error('Retry fetch after update failed (attempt)', attempt, e);
+                  }
                 }
 
-                // If the money wasn't decreased by expected amount, it's likely another concurrent request interfered.
+                if (!verified) {
+                  // couldn't verify — attempt rollback
+                  try { await pfUpdateUserData(playfabId, { Money: String(oldMoney) }); } catch (rollbackErr) { console.error('Rollback failed', rollbackErr); }
+                  return dmChannel.send("‼️ Could not verify PlayFab update after deduction. The transaction was rolled back — contact admins.");
+                }
+
                 const expected = oldMoney - rawPrice;
                 if (afterMoney !== expected) {
                   console.error(`Money verification failed for ${playfabId}: old=${oldMoney} expected=${expected} after=${afterMoney}`);
@@ -614,6 +669,9 @@ export default {
 
                 await dmChannel.send({ embeds: [successEmbed] });
 
+                // mark recent claim
+                recentClaims.set(playfabId, Date.now());
+
                 // try to alert channel about success (if configured)
                 try {
                   const cfg = await GuildConfig.findOne({ guildId });
@@ -651,6 +709,9 @@ export default {
               } else {
                 // non-gems flow: money already deducted, post manual alert and react with ✅ for admins
                 try {
+                  // mark recent claim
+                  recentClaims.set(playfabId, Date.now());
+
                   const cfg = await GuildConfig.findOne({ guildId });
                   if (!cfg?.rewardChannelId || !cfg?.rewardAlerts) {
                     // inform user that admins not notified automatically
