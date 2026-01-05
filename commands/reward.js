@@ -161,6 +161,21 @@ export default {
         const reward = rewardsRefreshed[idx];
 
         await btnInt.editReply({ content: "✅ Reward selected. I will DM you with next steps." });
+		
+		// --- blacklist check (insert here, requires GuildConfig import which you already have) ---
+		try {
+		  const cfgForBlacklist = await GuildConfig.findOne({ guildId });
+		  if (cfgForBlacklist?.blacklist && Array.isArray(cfgForBlacklist.blacklist) && cfgForBlacklist.blacklist.includes(btnInt.user.id)) {
+			// Inform the user they are blacklisted
+			try { await btnInt.editReply({ content: "❌ You are blacklisted from claiming rewards on this server. If you think this is a mistake, contact the moderators.", ephemeral: true }); } catch {}
+			// optionally DM them too
+			try { await btnInt.user.send("You are currently blacklisted from claiming rewards on that server. Please contact the server moderators for help."); } catch {}
+			return;
+		  }
+		} catch (blkErr) {
+		  console.error("Blacklist lookup failed:", blkErr);
+		  // non-fatal — continue (or, if you prefer, block until DB works)
+		}
 
         // DM flow
         try {

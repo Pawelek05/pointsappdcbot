@@ -1,4 +1,3 @@
-
 // models/GuildConfig.js
 import mongoose from 'mongoose';
 
@@ -10,7 +9,9 @@ const GuildConfigSchema = new mongoose.Schema({
   // NEW: channel to post reward alerts
   rewardChannelId: { type: String, default: null },
   // NEW: whether to post alerts when someone redeems a reward
-  rewardAlerts: { type: Boolean, default: true }
+  rewardAlerts: { type: Boolean, default: true },
+  // NEW: blacklist of Discord user IDs that cannot claim rewards
+  blacklist: { type: [String], default: [] }
 });
 
 GuildConfigSchema.index({ guildId: 1 }, { unique: true });
